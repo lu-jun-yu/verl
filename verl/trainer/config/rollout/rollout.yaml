@@ -104,6 +104,9 @@ n: 1
 # This controls the third loop inside fit() for TTPO algorithm
 g: 1
 
+# OPTS parameters
+c: 1.0
+
 # Search algorithm: null for standard PPO, "opts" for OPTS
 search: null
 

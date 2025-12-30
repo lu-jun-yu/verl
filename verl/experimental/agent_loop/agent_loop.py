@@ -323,6 +323,10 @@ class AgentLoopWorkerBase:
             responses:     |<- LLM generation ->|<- tool_calls ->|<- LLM generation ->|<- padding ->|
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
+        # Continuation mode: generate from input_ids instead of raw_prompt
+        if "input_ids" in batch.batch.keys():
+            return await self._generate_from_input_ids(batch)
+
         config = self.config.actor_rollout_ref.rollout
         sampling_params = dict(
             temperature=config.temperature,
@@ -579,6 +583,156 @@ class AgentLoopWorkerBase:
             num_turns=output.num_turns,
             metrics=output.metrics,
             extra_fields=output.extra_fields,
+        )
+
+    async def _generate_from_input_ids(self, batch: DataProto) -> DataProto:
+        """Generate sequences from input_ids (continuation mode).
+
+        Args:
+            batch (DataProto): Input batch containing:
+                - batch["input_ids"]: (bs, seq_len) existing tokens (prompt + partial response)
+                - batch["attention_mask"]: (bs, seq_len) attention mask
+                - non_tensor_batch["uid"]: request ids for sticky session
+
+        Returns:
+            DataProto: Output batch with generated sequences.
+        """
+        import time
+        config = self.config.actor_rollout_ref.rollout
+        sampling_params = dict(
+            temperature=config.temperature,
+            top_p=config.top_p,
+            repetition_penalty=1.0,
+            logprobs=config.calculate_log_probs,
+        )
+
+        if batch.meta_info.get("validate", False):
+            sampling_params["top_p"] = config.val_kwargs.top_p
+            sampling_params["temperature"] = config.val_kwargs.temperature
+
+        tasks = []
+        for i in range(len(batch)):
+            input_ids = batch.batch["input_ids"][i]
+            attention_mask = batch.batch["attention_mask"][i]
+
+            # Extract valid tokens (remove left padding)
+            valid_len = int(attention_mask.sum().item())
+            prompt_ids = input_ids[-valid_len:].tolist()
+
+            uid = batch.non_tensor_batch["uid"][i]
+
+            tasks.append(asyncio.create_task(
+                self.server_manager.generate(
+                    request_id=uid,
+                    prompt_ids=prompt_ids,
+                    sampling_params=sampling_params,
+                )
+            ))
+
+        start_time = time.time()
+        outputs = await asyncio.gather(*tasks)
+        gen_time = time.time() - start_time
+        return self._postprocess_continuation(batch, outputs, gen_time)
+
+    def _postprocess_continuation(self, input_batch: DataProto, outputs: list[TokenOutput], gen_time: float = 0.0) -> DataProto:
+        """Process continuation generation outputs."""
+        all_prompts = []
+        all_responses = []
+        all_response_masks = []
+        all_attention_masks = []
+        all_input_ids = []
+        all_position_ids = []
+        all_logprobs = []
+        all_metrics = []
+
+        for i, output in enumerate(outputs):
+            orig_input_ids = input_batch.batch["input_ids"][i]
+            orig_attention_mask = input_batch.batch["attention_mask"][i]
+            orig_valid_len = int(orig_attention_mask.sum().item())
+
+            # Original valid tokens as prompt_ids
+            prompt_ids = orig_input_ids[-orig_valid_len:].tolist()
+            # New generated tokens as response_ids
+            response_ids = output.token_ids
+            # All new tokens are LLM generated
+            response_mask = [1] * len(response_ids)
+
+            # Use tokenizer.pad for padding (same as _agent_loop_postprocess)
+            self.tokenizer.padding_side = "left"
+            prompt_output = self.tokenizer.pad(
+                {"input_ids": prompt_ids},
+                padding="max_length",
+                max_length=self.config.actor_rollout_ref.rollout.prompt_length,
+                return_tensors="pt",
+                return_attention_mask=True,
+            )
+            if prompt_output["input_ids"].dim() == 1:
+                prompt_output["input_ids"] = prompt_output["input_ids"].unsqueeze(0)
+                prompt_output["attention_mask"] = prompt_output["attention_mask"].unsqueeze(0)
+
+            self.tokenizer.padding_side = "right"
+            response_output = self.tokenizer.pad(
+                {"input_ids": response_ids},
+                padding="max_length",
+                max_length=self.config.actor_rollout_ref.rollout.response_length,
+                return_tensors="pt",
+                return_attention_mask=True,
+            )
+            if response_output["input_ids"].dim() == 1:
+                response_output["input_ids"] = response_output["input_ids"].unsqueeze(0)
+                response_output["attention_mask"] = response_output["attention_mask"].unsqueeze(0)
+
+            response_mask_output = self.tokenizer.pad(
+                {"input_ids": response_mask},
+                padding="max_length",
+                max_length=self.config.actor_rollout_ref.rollout.response_length,
+                return_tensors="pt",
+                return_attention_mask=False,
+            )
+            if response_mask_output["input_ids"].dim() == 1:
+                response_mask_output["input_ids"] = response_mask_output["input_ids"].unsqueeze(0)
+
+            final_response_mask = response_mask_output["input_ids"] * response_output["attention_mask"]
+            attention_mask = torch.cat([prompt_output["attention_mask"], response_output["attention_mask"]], dim=1)
+            combined_input_ids = torch.cat([prompt_output["input_ids"], response_output["input_ids"]], dim=1)
+            position_ids = compute_position_id_with_mask(attention_mask)
+
+            all_prompts.append(prompt_output["input_ids"])
+            all_responses.append(response_output["input_ids"])
+            all_response_masks.append(final_response_mask)
+            all_attention_masks.append(attention_mask)
+            all_input_ids.append(combined_input_ids)
+            all_position_ids.append(position_ids)
+
+            if output.log_probs is not None:
+                pad_size = self.config.actor_rollout_ref.rollout.response_length - len(output.log_probs)
+                logprobs = torch.tensor(output.log_probs + [0.0] * pad_size).unsqueeze(0)
+                all_logprobs.append(logprobs)
+
+            all_metrics.append({"generate_sequences": gen_time / len(outputs), "tool_calls": 0.0})
+
+        # Stack all tensors
+        batch_dict = {
+            "prompts": torch.cat(all_prompts, dim=0),
+            "responses": torch.cat(all_responses, dim=0),
+            "response_mask": torch.cat(all_response_masks, dim=0),
+            "input_ids": torch.cat(all_input_ids, dim=0),
+            "attention_mask": torch.cat(all_attention_masks, dim=0),
+            "position_ids": torch.cat(all_position_ids, dim=0),
+        }
+        if all_logprobs:
+            batch_dict["rollout_log_probs"] = torch.cat(all_logprobs, dim=0)
+
+        batch = TensorDict(batch_dict, batch_size=len(outputs))
+
+        # Copy non_tensor_batch from input
+        non_tensor_batch = {k: v for k, v in input_batch.non_tensor_batch.items()}
+        non_tensor_batch["__num_turns__"] = np.array([1] * len(outputs), dtype=np.int32)
+
+        return DataProto(
+            batch=batch,
+            non_tensor_batch=non_tensor_batch,
+            meta_info={"metrics": all_metrics, "reward_extra_keys": []},
         )
 
     def _postprocess(self, inputs: list[_InternalAgentLoopOutput]) -> DataProto:

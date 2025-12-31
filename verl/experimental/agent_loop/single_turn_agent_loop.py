@@ -33,7 +33,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
         self.prompt_length = self.config.actor_rollout_ref.rollout.prompt_length
         self.response_length = self.config.actor_rollout_ref.rollout.response_length
         self.apply_chat_template_kwargs = self.config.data.get("apply_chat_template_kwargs", {})
-        self.generation_prefix = self.config.data.get("generation_prefix", "")  # e.g., "<think>\n"
+        self.generation_prefix = self.config.data.get("generation_prefix", "<think>\n")  # e.g., "<think>\n"
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         messages = list(kwargs["raw_prompt"])

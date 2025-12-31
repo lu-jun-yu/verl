@@ -33,6 +33,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
         self.prompt_length = self.config.actor_rollout_ref.rollout.prompt_length
         self.response_length = self.config.actor_rollout_ref.rollout.response_length
         self.apply_chat_template_kwargs = self.config.data.get("apply_chat_template_kwargs", {})
+        self.generation_prefix = self.config.data.get("generation_prefix", "")  # e.g., "<think>\n"
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         messages = list(kwargs["raw_prompt"])
@@ -52,15 +53,22 @@ class SingleTurnAgentLoop(AgentLoopBase):
                     **self.apply_chat_template_kwargs,
                 ),
             )
+            # Add generation prefix (e.g., "<think>\n") to force specific generation format
+            if self.generation_prefix:
+                raw_prompt = raw_prompt + self.generation_prefix
             model_inputs = self.processor(text=[raw_prompt], images=image_data, return_tensors="pt")
             prompt_ids = model_inputs.pop("input_ids").squeeze(0).tolist()
         else:
-            prompt_ids = await self.loop.run_in_executor(
+            raw_prompt = await self.loop.run_in_executor(
                 None,
                 lambda: self.tokenizer.apply_chat_template(
-                    messages, add_generation_prompt=True, tokenize=True, **self.apply_chat_template_kwargs
+                    messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
                 ),
             )
+            # Add generation prefix (e.g., "<think>\n") to force specific generation format
+            if self.generation_prefix:
+                raw_prompt = raw_prompt + self.generation_prefix
+            prompt_ids = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
 
         with simple_timer("generate_sequences", metrics):
             output = await self.server_manager.generate(

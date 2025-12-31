@@ -695,7 +695,7 @@ class AgentLoopWorkerBase:
             attention_mask = batch.batch["attention_mask"][i]
 
             # Extract valid tokens (remove left padding)
-            valid_len = max(int(attention_mask.sum().item()), self.config.data.max_prompt_length)
+            valid_len = int(attention_mask.sum().item())
             prompt_ids = input_ids[-valid_len:].tolist()
 
             trace_this_sample = i in traced_indices

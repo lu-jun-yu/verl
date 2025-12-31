@@ -83,3 +83,41 @@ class SingleTurnAgentLoop(AgentLoopBase):
             metrics=metrics,
         )
         return output
+
+    async def run_from_input_ids(
+        self, sampling_params: dict[str, Any], prompt_ids: list[int], **kwargs
+    ) -> AgentLoopOutput:
+        """Run agent loop from input_ids (continuation mode).
+
+        Args:
+            sampling_params (Dict[str, Any]): Sampling parameters for the chat completion.
+            prompt_ids (List[int]): List of prompt token ids (existing tokens to continue from).
+            **kwargs: dataset fields from `verl.utils.dataset.RLHFDataset`.
+
+        Returns:
+            AgentLoopOutput: Agent loop output.
+        """
+        metrics = {}
+        request_id = uuid4().hex
+
+        with simple_timer("generate_sequences", metrics):
+            output = await self.server_manager.generate(
+                request_id=request_id, prompt_ids=prompt_ids, sampling_params=sampling_params, image_data=None
+            )
+        response_mask = [1] * len(output.token_ids)
+
+        output = AgentLoopOutput(
+            prompt_ids=prompt_ids,
+            response_ids=output.token_ids[: self.response_length],
+            response_mask=response_mask[: self.response_length],
+            response_logprobs=output.log_probs[: self.response_length] if output.log_probs else None,
+            routed_experts=(
+                output.routed_experts[: len(prompt_ids) + self.response_length]
+                if output.routed_experts is not None
+                else None
+            ),
+            multi_modal_data={},
+            num_turns=2,
+            metrics=metrics,
+        )
+        return output

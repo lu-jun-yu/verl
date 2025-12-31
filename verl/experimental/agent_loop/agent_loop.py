@@ -222,6 +222,22 @@ class AgentLoopBase(ABC):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    async def run_from_input_ids(
+        self, sampling_params: dict[str, Any], prompt_ids: list[int], **kwargs
+    ) -> AgentLoopOutput:
+        """Run agent loop from input_ids (continuation mode).
+
+        Args:
+            sampling_params (Dict[str, Any]): LLM sampling params.
+            prompt_ids (List[int]): List of prompt token ids (existing tokens to continue from).
+            **kwargs: dataset fields from `verl.utils.dataset.RLHFDataset`.
+
+        Returns:
+            AgentLoopOutput: Agent loop output.
+        """
+        raise NotImplementedError
+
 
 """Agent loop registry: key is agent_name, value is a dict of agent loop config
 used by hydra.utils.instantiate to initialize agent loop instance.
@@ -324,7 +340,7 @@ class AgentLoopWorkerBase:
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
         # Continuation mode: generate from input_ids instead of raw_prompt
-        if "input_ids" in batch.batch.keys():
+        if batch.meta_info["round_idx"] >= 1:
             return await self._generate_from_input_ids(batch)
 
         config = self.config.actor_rollout_ref.rollout
@@ -415,6 +431,39 @@ class AgentLoopWorkerBase:
                 processor=self.processor,
             )
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
+            return await self._agent_loop_postprocess(output, **kwargs)
+
+    async def _run_agent_loop_from_input_ids(
+        self,
+        sampling_params: dict[str, Any],
+        prompt_ids: list[int],
+        trajectory: dict[str, Any],
+        *,
+        agent_name: str,
+        trace: bool = True,
+        **kwargs,
+    ) -> _InternalAgentLoopOutput:
+        with rollout_trace_attr(
+            step=trajectory["step"],
+            sample_index=trajectory["sample_index"],
+            rollout_n=trajectory["rollout_n"],
+            validate=trajectory["validate"],
+            name="agent_loop",
+            trace=trace,
+        ):
+            assert agent_name in _agent_loop_registry, (
+                f"Agent loop {agent_name} not registered, registered agent loops: {_agent_loop_registry.keys()}"
+            )
+
+            agent_loop_config = _agent_loop_registry[agent_name]
+            agent_loop = hydra.utils.instantiate(
+                config=agent_loop_config,
+                trainer_config=DictConfigWrap(config=self.config),
+                server_manager=self.server_manager,
+                tokenizer=self.tokenizer,
+                processor=self.processor,
+            )
+            output: AgentLoopOutput = await agent_loop.run_from_input_ids(sampling_params, prompt_ids, **kwargs)
             return await self._agent_loop_postprocess(output, **kwargs)
 
     async def _agent_loop_postprocess(self, output, **kwargs) -> _InternalAgentLoopOutput:
@@ -597,7 +646,6 @@ class AgentLoopWorkerBase:
         Returns:
             DataProto: Output batch with generated sequences.
         """
-        import time
         config = self.config.actor_rollout_ref.rollout
         sampling_params = dict(
             temperature=config.temperature,
@@ -606,9 +654,40 @@ class AgentLoopWorkerBase:
             logprobs=config.calculate_log_probs,
         )
 
+        # override sampling params for validation
         if batch.meta_info.get("validate", False):
             sampling_params["top_p"] = config.val_kwargs.top_p
             sampling_params["temperature"] = config.val_kwargs.temperature
+
+        # by default, we assume it's a single turn agent
+        if "agent_name" not in batch.non_tensor_batch:
+            default_agent_loop = config.agent.default_agent_loop
+            batch.non_tensor_batch["agent_name"] = np.array([default_agent_loop] * len(batch), dtype=object)
+
+        if "index" in batch.non_tensor_batch:
+            index = batch.non_tensor_batch["index"]
+        else:
+            index = np.arange(len(batch))
+
+        max_samples_per_worker = RolloutTraceConfig.get_instance().max_samples_per_step_per_worker
+
+        # For n rollouts per sample, we trace all n rollouts for selected samples
+        # Note: This sampling happens per-worker, so total traces = max_samples_per_worker * num_workers * n
+        if max_samples_per_worker is not None:
+            unique_sample_indices = np.unique(index)
+            if max_samples_per_worker < len(unique_sample_indices):
+                selected_samples = set(
+                    np.random.choice(unique_sample_indices, max_samples_per_worker, replace=False).tolist()
+                )
+                traced_indices = set(i for i in range(len(batch)) if index[i] in selected_samples)
+            else:
+                traced_indices = set(range(len(batch)))
+        else:
+            traced_indices = set(range(len(batch)))
+
+        trajectory_info = await get_trajectory_info(
+            batch.meta_info.get("global_steps", -1), index.tolist(), batch.meta_info.get("validate", False)
+        )
 
         tasks = []
         for i in range(len(batch)):
@@ -619,121 +698,20 @@ class AgentLoopWorkerBase:
             valid_len = int(attention_mask.sum().item())
             prompt_ids = input_ids[-valid_len:].tolist()
 
-            uid = batch.non_tensor_batch["uid"][i]
-
-            tasks.append(asyncio.create_task(
-                self.server_manager.generate(
-                    request_id=uid,
-                    prompt_ids=prompt_ids,
-                    sampling_params=sampling_params,
+            trace_this_sample = i in traced_indices
+            kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
+            tasks.append(
+                asyncio.create_task(
+                    self._run_agent_loop_from_input_ids(
+                        sampling_params, prompt_ids, trajectory_info[i], trace=trace_this_sample, **kwargs
+                    )
                 )
-            ))
-
-        start_time = time.time()
+            )
         outputs = await asyncio.gather(*tasks)
-        gen_time = time.time() - start_time
-        return self._postprocess_continuation(batch, outputs, gen_time)
 
-    def _postprocess_continuation(self, input_batch: DataProto, outputs: list[TokenOutput], gen_time: float = 0.0) -> DataProto:
-        """Process continuation generation outputs."""
-        all_prompts = []
-        all_responses = []
-        all_response_masks = []
-        all_attention_masks = []
-        all_input_ids = []
-        all_position_ids = []
-        all_logprobs = []
-        all_metrics = []
+        output = self._postprocess(outputs)
 
-        for i, output in enumerate(outputs):
-            orig_input_ids = input_batch.batch["input_ids"][i]
-            orig_attention_mask = input_batch.batch["attention_mask"][i]
-            orig_valid_len = int(orig_attention_mask.sum().item())
-
-            # Original valid tokens as prompt_ids
-            prompt_ids = orig_input_ids[-orig_valid_len:].tolist()
-            # New generated tokens as response_ids
-            response_ids = output.token_ids
-            # All new tokens are LLM generated
-            response_mask = [1] * len(response_ids)
-
-            # Use tokenizer.pad for padding (same as _agent_loop_postprocess)
-            self.tokenizer.padding_side = "left"
-            prompt_output = self.tokenizer.pad(
-                {"input_ids": prompt_ids},
-                padding="max_length",
-                max_length=self.config.actor_rollout_ref.rollout.prompt_length,
-                return_tensors="pt",
-                return_attention_mask=True,
-            )
-            if prompt_output["input_ids"].dim() == 1:
-                prompt_output["input_ids"] = prompt_output["input_ids"].unsqueeze(0)
-                prompt_output["attention_mask"] = prompt_output["attention_mask"].unsqueeze(0)
-
-            self.tokenizer.padding_side = "right"
-            response_output = self.tokenizer.pad(
-                {"input_ids": response_ids},
-                padding="max_length",
-                max_length=self.config.actor_rollout_ref.rollout.response_length,
-                return_tensors="pt",
-                return_attention_mask=True,
-            )
-            if response_output["input_ids"].dim() == 1:
-                response_output["input_ids"] = response_output["input_ids"].unsqueeze(0)
-                response_output["attention_mask"] = response_output["attention_mask"].unsqueeze(0)
-
-            response_mask_output = self.tokenizer.pad(
-                {"input_ids": response_mask},
-                padding="max_length",
-                max_length=self.config.actor_rollout_ref.rollout.response_length,
-                return_tensors="pt",
-                return_attention_mask=False,
-            )
-            if response_mask_output["input_ids"].dim() == 1:
-                response_mask_output["input_ids"] = response_mask_output["input_ids"].unsqueeze(0)
-
-            final_response_mask = response_mask_output["input_ids"] * response_output["attention_mask"]
-            attention_mask = torch.cat([prompt_output["attention_mask"], response_output["attention_mask"]], dim=1)
-            combined_input_ids = torch.cat([prompt_output["input_ids"], response_output["input_ids"]], dim=1)
-            position_ids = compute_position_id_with_mask(attention_mask)
-
-            all_prompts.append(prompt_output["input_ids"])
-            all_responses.append(response_output["input_ids"])
-            all_response_masks.append(final_response_mask)
-            all_attention_masks.append(attention_mask)
-            all_input_ids.append(combined_input_ids)
-            all_position_ids.append(position_ids)
-
-            if output.log_probs is not None:
-                pad_size = self.config.actor_rollout_ref.rollout.response_length - len(output.log_probs)
-                logprobs = torch.tensor(output.log_probs + [0.0] * pad_size).unsqueeze(0)
-                all_logprobs.append(logprobs)
-
-            all_metrics.append({"generate_sequences": gen_time / len(outputs), "tool_calls": 0.0})
-
-        # Stack all tensors
-        batch_dict = {
-            "prompts": torch.cat(all_prompts, dim=0),
-            "responses": torch.cat(all_responses, dim=0),
-            "response_mask": torch.cat(all_response_masks, dim=0),
-            "input_ids": torch.cat(all_input_ids, dim=0),
-            "attention_mask": torch.cat(all_attention_masks, dim=0),
-            "position_ids": torch.cat(all_position_ids, dim=0),
-        }
-        if all_logprobs:
-            batch_dict["rollout_log_probs"] = torch.cat(all_logprobs, dim=0)
-
-        batch = TensorDict(batch_dict, batch_size=len(outputs))
-
-        # Copy non_tensor_batch from input
-        non_tensor_batch = {k: v for k, v in input_batch.non_tensor_batch.items()}
-        non_tensor_batch["__num_turns__"] = np.array([1] * len(outputs), dtype=np.int32)
-
-        return DataProto(
-            batch=batch,
-            non_tensor_batch=non_tensor_batch,
-            meta_info={"metrics": all_metrics, "reward_extra_keys": []},
-        )
+        return output
 
     def _postprocess(self, inputs: list[_InternalAgentLoopOutput]) -> DataProto:
         """Process the padded outputs from _run_agent_loop and combine them into a batch."""

@@ -119,9 +119,9 @@ class DataParallelPPOCritic(BasePPOCritic):
 
                 # Apply activation function based on config
                 if self.value_head_activation == "sigmoid":
-                    values = torch.sigmoid(values)
+                    values = torch.sigmoid(values * 0.1)
                 elif self.value_head_activation == "tanh":
-                    values = torch.tanh(values)
+                    values = torch.tanh(values * 0.1)
             else:
                 output = self.critic_module(
                     input_ids=input_ids,
@@ -139,9 +139,9 @@ class DataParallelPPOCritic(BasePPOCritic):
 
                 # Apply activation function based on config
                 if self.value_head_activation == "sigmoid":
-                    values = torch.sigmoid(values)
+                    values = torch.sigmoid(values * 0.1)
                 elif self.value_head_activation == "tanh":
-                    values = torch.tanh(values)
+                    values = torch.tanh(values * 0.1)
             return values
 
     def _optimizer_step(self):

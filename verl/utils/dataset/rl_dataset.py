@@ -238,8 +238,10 @@ class RLHFDataset(Dataset):
                         if self.tool_schemas is not None:
                             apply_kwargs["tools"] = self.tool_schemas
 
+                        raw_prompt = tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True, tokenize=False, **apply_kwargs) + "<think>\n"
+
                         return len(
-                            tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True, **apply_kwargs)
+                            tokenizer.encode(raw_prompt, add_special_tokens=False)
                         )
                     except Exception:
                         print("Error processing one of the samples, skipping...")

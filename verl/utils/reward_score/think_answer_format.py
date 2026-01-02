@@ -22,20 +22,21 @@ from typing import Optional, Tuple
 
 
 def check_format(response_str: str) -> bool:
-    """Check if the response follows the strict format: ...思考内容...</think><answer>答案</answer>
+    """Check if the response follows the strict format: <think>...思考内容...</think><answer>答案</answer>
 
     The response should:
-    1. End the thinking section with </think>
-    2. Have <answer>...</answer> after </think>
+    1. Start with <think>
+    2. End the thinking section with </think>
+    3. Have <answer>...</answer> after </think>
 
     Args:
-        response_str: The response string to check (without the <think> prefix).
+        response_str: The response string to check.
 
     Returns:
         True if the format is correct, False otherwise.
     """
-    # Strict format: must have </think> followed by <answer>...</answer>
-    pattern = r'^.*</think>\s*<answer>.*</answer>\s*$'
+    # Strict format: must have <think>...</think> followed by <answer>...</answer>
+    pattern = r'^\s*<think>.*</think>\s*<answer>.*</answer>\s*$'
     return bool(re.match(pattern, response_str, re.DOTALL))
 
 
@@ -82,7 +83,7 @@ def compute_score(
     Total reward = format_reward + correct_reward (if both conditions met)
 
     Args:
-        solution_str: The response string (without <think> prefix, which is in prompt).
+        solution_str: The response string (should be <think>...</think><answer>...</answer>).
         ground_truth: The expected answer.
         format_reward: Reward for correct format (0.5).
         correct_reward: Reward for correct answer (0.5).
@@ -92,7 +93,7 @@ def compute_score(
     """
     total_score = 0.0
 
-    # Check format: must have </think><answer>...</answer>
+    # Check format: must have <think>...</think><answer>...</answer>
     if check_format(solution_str):
         total_score += format_reward
 

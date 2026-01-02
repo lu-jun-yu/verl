@@ -12,10 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Reward function for ...</think><answer>...</answer> format.
+Reward function for <think>...</think><answer>...</answer> format.
 
-Note: The prompt already contains "<think>\n" as generation_prefix,
-so the response should be: "...thinking...</think><answer>answer</answer>"
+The response should be: "<think>...thinking...</think><answer>answer</answer>"
 """
 
 import re

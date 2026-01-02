@@ -112,7 +112,6 @@ class RLHFDataset(Dataset):
         self.truncation = config.get("truncation", "error")
         self.filter_overlong_prompts = config.get("filter_overlong_prompts", True)
         self.apply_chat_template_kwargs = config.get("apply_chat_template_kwargs", {})
-        self.generation_prefix = config.get("generation_prefix", "")  # e.g., "<think>\n" to force thinking
 
         self.tool_config_path = config.get("tool_config_path", None)
         self.tool_schemas = None
@@ -238,10 +237,8 @@ class RLHFDataset(Dataset):
                         if self.tool_schemas is not None:
                             apply_kwargs["tools"] = self.tool_schemas
 
-                        raw_prompt = tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True, tokenize=False, **apply_kwargs) + "<think>\n"
-
                         return len(
-                            tokenizer.encode(raw_prompt, add_special_tokens=False)
+                            tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True, **apply_kwargs)
                         )
                     except Exception:
                         print("Error processing one of the samples, skipping...")
@@ -304,9 +301,6 @@ class RLHFDataset(Dataset):
             raw_prompt = self.processor.apply_chat_template(
                 messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
             )
-            # Add generation prefix (e.g., "<think>\n") to force specific generation format
-            if self.generation_prefix:
-                raw_prompt = raw_prompt + self.generation_prefix
             multi_modal_data = {}
 
             images = None
@@ -369,9 +363,6 @@ class RLHFDataset(Dataset):
             raw_prompt = self.tokenizer.apply_chat_template(
                 messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
             )
-            # Add generation prefix (e.g., "<think>\n") to force specific generation format
-            if self.generation_prefix:
-                raw_prompt = raw_prompt + self.generation_prefix
             model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")

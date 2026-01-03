@@ -77,6 +77,7 @@ def compute_score(
     ground_truth: str,
     format_reward: float = 0.5,
     correct_reward: float = 0.5,
+    extra_info: Optional[dict] = None,
 ) -> float:
     """Compute the score for a response.
 
@@ -87,10 +88,15 @@ def compute_score(
         ground_truth: The expected answer.
         format_reward: Reward for correct format (0.5).
         correct_reward: Reward for correct answer (0.5).
+        extra_info: Optional extra info dict, may contain 'full_response_str' for tree search.
 
     Returns:
         The computed score (0, 0.5, or 1.0).
     """
+    # OPTS_TTPO: Use full response string if available (for tree search)
+    if extra_info and "full_response_str" in extra_info:
+        solution_str = extra_info["full_response_str"]
+
     total_score = 0.0
 
     # Check format: must have </think><answer>...</answer>

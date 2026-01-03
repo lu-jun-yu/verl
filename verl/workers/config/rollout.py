@@ -130,6 +130,7 @@ class RolloutConfig(BaseConfig):
     n: int = 1
     g: int = 1
     c: float = 1.0
+    alpha: float = 0.99
     search: str = None
     repetition_penalty: float = 1.0
 

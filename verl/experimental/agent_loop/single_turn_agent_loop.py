@@ -104,15 +104,23 @@ class SingleTurnAgentLoop(AgentLoopBase):
             output = await self.server_manager.generate(
                 request_id=request_id, prompt_ids=prompt_ids, sampling_params=sampling_params, image_data=None
             )
-        response_mask = [1] * len(output.token_ids)
+
+        # Calculate allowed new response length: total response should not exceed max_response_length
+        raw_prompt_len = int(kwargs["raw_prompt_len"])
+        prev_response_len = len(prompt_ids) - raw_prompt_len
+        allowed_new_response_len = max(0, self.response_length - prev_response_len)
+
+        response_ids = output.token_ids[:allowed_new_response_len]
+        response_mask = [1] * len(response_ids)
+        response_logprobs = output.log_probs[:allowed_new_response_len] if output.log_probs else None
 
         output = AgentLoopOutput(
             prompt_ids=prompt_ids,
-            response_ids=output.token_ids[: self.response_length],
-            response_mask=response_mask[: self.response_length],
-            response_logprobs=output.log_probs[: self.response_length] if output.log_probs else None,
+            response_ids=response_ids,
+            response_mask=response_mask,
+            response_logprobs=response_logprobs,
             routed_experts=(
-                output.routed_experts[: len(prompt_ids) + self.response_length]
+                output.routed_experts[: len(prompt_ids) + len(response_ids)]
                 if output.routed_experts is not None
                 else None
             ),

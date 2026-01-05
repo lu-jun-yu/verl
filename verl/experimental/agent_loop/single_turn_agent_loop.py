@@ -109,18 +109,15 @@ class SingleTurnAgentLoop(AgentLoopBase):
         raw_prompt_len = int(kwargs["raw_prompt_len"])
         prev_response_len = len(prompt_ids) - raw_prompt_len
         allowed_new_response_len = max(0, self.response_length - prev_response_len)
-
-        response_ids = output.token_ids[:allowed_new_response_len]
-        response_mask = [1] * len(response_ids)
-        response_logprobs = output.log_probs[:allowed_new_response_len] if output.log_probs else None
+        response_mask = [1] * allowed_new_response_len
 
         output = AgentLoopOutput(
             prompt_ids=prompt_ids,
-            response_ids=response_ids,
+            response_ids=output.token_ids[:allowed_new_response_len],
             response_mask=response_mask,
-            response_logprobs=response_logprobs,
+            response_logprobs=output.log_probs[:allowed_new_response_len] if output.log_probs else None,
             routed_experts=(
-                output.routed_experts[: len(prompt_ids) + len(response_ids)]
+                output.routed_experts[: len(prompt_ids) + allowed_new_response_len]
                 if output.routed_experts is not None
                 else None
             ),

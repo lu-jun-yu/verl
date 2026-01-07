@@ -105,10 +105,7 @@ n: 1
 g: 1
 
 # OPTS parameters
-c: 1.0
-
-# Decay factor for alpha_t in OPTS
-alpha: 0.99
+root_tuct: 0.0
 
 # Search algorithm: null for standard PPO, "opts" for OPTS
 search: null

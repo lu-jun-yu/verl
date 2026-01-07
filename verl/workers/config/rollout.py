@@ -129,8 +129,7 @@ class RolloutConfig(BaseConfig):
     do_sample: bool = True
     n: int = 1
     g: int = 1
-    c: float = 1.0
-    alpha: float = 0.99
+    root_tuct: float = 0.0
     search: str = None
     repetition_penalty: float = 1.0
 

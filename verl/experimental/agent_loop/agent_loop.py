@@ -340,7 +340,7 @@ class AgentLoopWorkerBase:
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
         # Continuation mode: generate from input_ids instead of raw_prompt
-        if batch.meta_info["round_idx"] >= 1:
+        if "round_idx" in batch.meta_info and batch.meta_info["round_idx"] >= 1:
             return await self._generate_from_input_ids(batch)
 
         config = self.config.actor_rollout_ref.rollout

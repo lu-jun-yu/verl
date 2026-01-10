@@ -23,7 +23,7 @@ rollout:
   top_p: 0.7
   prompt_length: 1536
   response_length: 512
-  root_tuct: 0.1  # root TUCT value for OPTS state selection
+  root_tuct: 0.0  # root TUCT value for OPTS state selection
   # for vllm rollout
   dtype: bfloat16 # should align with FSDP
   gpu_memory_utilization: 0.5

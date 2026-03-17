@@ -609,6 +609,23 @@ class AgentLoopWorkerBase:
                 "tool_extra_fields": np.array([output.extra_fields], dtype=object),
             }
 
+            if "raw_prompt_len" in kwargs:
+                raw_prompt_len = int(kwargs["raw_prompt_len"])
+                prompt_len = prompt_output["input_ids"].shape[-1]
+                valid_prompt_len = int(prompt_output["attention_mask"].sum().item())
+                pad_len = prompt_len - valid_prompt_len
+                response_len = response_output["input_ids"].shape[-1]
+                start_pos = pad_len + raw_prompt_len
+                end_pos = start_pos + response_len
+                full_response_ids = input_ids[0, start_pos:end_pos]
+                valid_mask = attention_mask[0, start_pos:end_pos].bool()
+                full_response_str = self.tokenizer.decode(full_response_ids[valid_mask], skip_special_tokens=True)
+                extra_info = kwargs.get("extra_info", {})
+                if not isinstance(extra_info, dict):
+                    extra_info = {}
+                extra_info["full_response_str"] = full_response_str
+                non_tensor_batch["extra_info"] = np.array([extra_info], dtype=object)
+
             data = DataProto(
                 batch=batch,
                 non_tensor_batch=non_tensor_batch,

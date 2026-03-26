@@ -24,7 +24,11 @@ from torch import nn, optim
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from verl import DataProto
-from verl.trainer.ppo import core_algos
+# Import from local core_algos for OPTS_TTPO branch_weight support
+try:
+    from trainer.opts_ttpo import core_algos
+except ImportError:
+    from verl.trainer.ppo import core_algos
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
@@ -208,6 +212,9 @@ class DataParallelPPOCritic(BasePPOCritic):
         metrics = {}
 
         select_keys = ["input_ids", "responses", "response_mask", "attention_mask", "position_ids", "values", "returns"]
+        # Include branch_weight for OPTS_TTPO gradient correction
+        if "branch_weight" in data.batch.keys():
+            select_keys.append("branch_weight")
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
 
@@ -239,6 +246,8 @@ class DataParallelPPOCritic(BasePPOCritic):
                     returns = model_inputs["returns"]
 
                     vpreds = self._forward_micro_batch(model_inputs)
+                    # Extract branch_weight for OPTS_TTPO gradient correction
+                    branch_weight = model_inputs.get("branch_weight", None)
                     vf_loss, vf_clipfrac = core_algos.compute_value_loss(
                         vpreds=vpreds,
                         values=values,
@@ -246,6 +255,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                         response_mask=response_mask,
                         cliprange_value=self.config.cliprange_value,
                         loss_agg_mode=self.config.loss_agg_mode,
+                        branch_weight=branch_weight,
                     )
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz

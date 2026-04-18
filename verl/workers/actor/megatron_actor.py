@@ -37,7 +37,10 @@ from omegaconf import OmegaConf
 from torch import nn
 
 from verl import DataProto
-from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
+try:
+    from trainer.opts_ttpo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
+except ImportError:
+    from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.device import get_device_id, get_torch_device
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.megatron.router_replay_patch import RouterReplay, RouterReplayAction
@@ -352,6 +355,8 @@ class MegatronPPOActor(BasePPOActor):
         # Include rollout_log_probs for computing rollout_corr metrics in bypass mode
         if "rollout_log_probs" in data.batch.keys():
             select_keys.append("rollout_log_probs")
+        if "branch_weight" in data.batch.keys():
+            select_keys.append("branch_weight")
         self.has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         # router replay
         if self.enable_routing_replay:
@@ -486,15 +491,28 @@ class MegatronPPOActor(BasePPOActor):
                 # Extract pre-computed rollout correction weights if present
                 # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
                 rollout_is_weights = data.get("rollout_is_weights", None)
-                pg_loss, pg_metrics = policy_loss_fn(
-                    old_log_prob=old_log_prob,
-                    log_prob=log_prob,
-                    advantages=advantages,
-                    response_mask=response_mask,
-                    loss_agg_mode=loss_agg_mode,
-                    config=self.config,
-                    rollout_is_weights=rollout_is_weights,
-                )
+                branch_weight = data.get("branch_weight", None)
+                if branch_weight is not None:
+                    pg_loss, pg_metrics = policy_loss_fn(
+                        old_log_prob=old_log_prob,
+                        log_prob=log_prob,
+                        advantages=advantages,
+                        response_mask=response_mask,
+                        loss_agg_mode=loss_agg_mode,
+                        config=self.config,
+                        rollout_is_weights=rollout_is_weights,
+                        branch_weight=branch_weight,
+                    )
+                else:
+                    pg_loss, pg_metrics = policy_loss_fn(
+                        old_log_prob=old_log_prob,
+                        log_prob=log_prob,
+                        advantages=advantages,
+                        response_mask=response_mask,
+                        loss_agg_mode=loss_agg_mode,
+                        config=self.config,
+                        rollout_is_weights=rollout_is_weights,
+                    )
                 stats.update(pg_metrics)
 
                 # Skip if using bypass_mode loss (metrics already computed in pg_metrics)

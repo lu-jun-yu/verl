@@ -30,7 +30,10 @@ from omegaconf import OmegaConf
 from torch import nn
 
 from verl import DataProto
-from verl.trainer.ppo import core_algos
+try:
+    from trainer.opts_ttpo import core_algos
+except ImportError:
+    from verl.trainer.ppo import core_algos
 from verl.utils.device import get_device_id, get_torch_device
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
 from verl.utils.profiler import GPUMemoryLogger
@@ -143,6 +146,8 @@ class MegatronPPOCritic(BasePPOCritic):
 
     def make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
         select_keys = ["input_ids", "responses", "attention_mask", "position_ids", "values", "returns"]
+        if "branch_weight" in data.batch.keys():
+            select_keys.append("branch_weight")
         data = data.select(batch_keys=select_keys)
         return data.make_iterator(
             mini_batch_size=self.config.ppo_mini_batch_size,
@@ -212,6 +217,7 @@ class MegatronPPOCritic(BasePPOCritic):
             attention_mask = data["attention_mask"]
             values = data["values"]
             returns = data["returns"]
+            branch_weight = data.get("branch_weight", None)
             response_length = responses.size(1)
 
             response_mask = attention_mask[:, -response_length:]
@@ -221,14 +227,25 @@ class MegatronPPOCritic(BasePPOCritic):
             vpreds = output  # (bs, sequence_length)
             vpreds = vpreds[:, -response_length - 1 : -1]
 
-            vf_loss, vf_clipfrac = core_algos.compute_value_loss(
-                vpreds=vpreds,
-                values=values,
-                returns=returns,
-                response_mask=response_mask,
-                cliprange_value=cliprange_value,
-                loss_agg_mode=self.config.loss_agg_mode,
-            )
+            if branch_weight is not None:
+                vf_loss, vf_clipfrac = core_algos.compute_value_loss(
+                    vpreds=vpreds,
+                    values=values,
+                    returns=returns,
+                    response_mask=response_mask,
+                    cliprange_value=cliprange_value,
+                    loss_agg_mode=self.config.loss_agg_mode,
+                    branch_weight=branch_weight,
+                )
+            else:
+                vf_loss, vf_clipfrac = core_algos.compute_value_loss(
+                    vpreds=vpreds,
+                    values=values,
+                    returns=returns,
+                    response_mask=response_mask,
+                    cliprange_value=cliprange_value,
+                    loss_agg_mode=self.config.loss_agg_mode,
+                )
 
             stats = {
                 "critic/vf_loss": vf_loss.detach().item(),

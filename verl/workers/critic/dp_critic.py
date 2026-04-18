@@ -248,15 +248,25 @@ class DataParallelPPOCritic(BasePPOCritic):
                     vpreds = self._forward_micro_batch(model_inputs)
                     # Extract branch_weight for OPTS_TTPO gradient correction
                     branch_weight = model_inputs.get("branch_weight", None)
-                    vf_loss, vf_clipfrac = core_algos.compute_value_loss(
-                        vpreds=vpreds,
-                        values=values,
-                        returns=returns,
-                        response_mask=response_mask,
-                        cliprange_value=self.config.cliprange_value,
-                        loss_agg_mode=self.config.loss_agg_mode,
-                        branch_weight=branch_weight,
-                    )
+                    if branch_weight is not None:
+                        vf_loss, vf_clipfrac = core_algos.compute_value_loss(
+                            vpreds=vpreds,
+                            values=values,
+                            returns=returns,
+                            response_mask=response_mask,
+                            cliprange_value=self.config.cliprange_value,
+                            loss_agg_mode=self.config.loss_agg_mode,
+                            branch_weight=branch_weight,
+                        )
+                    else:
+                        vf_loss, vf_clipfrac = core_algos.compute_value_loss(
+                            vpreds=vpreds,
+                            values=values,
+                            returns=returns,
+                            response_mask=response_mask,
+                            cliprange_value=self.config.cliprange_value,
+                            loss_agg_mode=self.config.loss_agg_mode,
+                        )
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
                         loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size

@@ -66,8 +66,35 @@ class Tracking:
             import wandb
 
             settings = None
-            if config and config["trainer"].get("wandb_proxy", None):
-                settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
+            trainer_config = config.get("trainer", {}) if config else {}
+            settings_kwargs = {}
+
+            wandb_proxy = (
+                trainer_config.get("wandb_proxy")
+                or os.environ.get("WANDB_PROXY")
+                or os.environ.get("HTTPS_PROXY")
+                or os.environ.get("https_proxy")
+                or os.environ.get("ALL_PROXY")
+                or os.environ.get("all_proxy")
+                or os.environ.get("HTTP_PROXY")
+                or os.environ.get("http_proxy")
+            )
+            if wandb_proxy:
+                settings_kwargs["http_proxy"] = wandb_proxy
+                settings_kwargs["https_proxy"] = wandb_proxy
+
+            wandb_init_timeout = trainer_config.get("wandb_init_timeout")
+            if wandb_init_timeout is None:
+                wandb_init_timeout = os.environ.get("WANDB_INIT_TIMEOUT", "300")
+            settings_kwargs["init_timeout"] = float(wandb_init_timeout)
+
+            wandb_service_wait = trainer_config.get("wandb_service_wait")
+            if wandb_service_wait is None:
+                wandb_service_wait = os.environ.get("WANDB_SERVICE_WAIT", "60")
+            settings_kwargs["x_service_wait"] = float(wandb_service_wait)
+
+            if settings_kwargs:
+                settings = wandb.Settings(**settings_kwargs)
             entity = os.environ.get("WANDB_ENTITY", None)
             wandb.init(project=project_name, name=experiment_name, entity=entity, config=config, settings=settings)
             self.logger["wandb"] = wandb

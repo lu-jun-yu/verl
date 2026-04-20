@@ -236,6 +236,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                     # Extract branch_weight for OPTS_TTPO gradient correction
                     branch_weight = model_inputs.get("branch_weight", None)
                     if branch_weight is not None:
+                        dp_world_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
                         vf_loss, vf_clipfrac = core_algos.compute_value_loss(
                             vpreds=vpreds,
                             values=values,
@@ -244,6 +245,8 @@ class DataParallelPPOCritic(BasePPOCritic):
                             cliprange_value=self.config.cliprange_value,
                             loss_agg_mode=self.config.loss_agg_mode,
                             branch_weight=branch_weight,
+                            dp_size=dp_world_size,
+                            dist_group=None,
                         )
                     else:
                         vf_loss, vf_clipfrac = core_algos.compute_value_loss(

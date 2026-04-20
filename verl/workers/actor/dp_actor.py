@@ -500,6 +500,11 @@ class DataParallelPPOActor(BasePPOActor):
 
                     # Compute policy loss (any function is expected to return 2 values)
                     if branch_weight is not None:
+                        if loss_mode != "vanilla":
+                            raise NotImplementedError(
+                                "TTPO branch_weight correction currently only supports loss_mode='vanilla'."
+                            )
+                        dp_world_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
                         pg_loss, pg_metrics = policy_loss_fn(
                             old_log_prob=old_log_prob,
                             log_prob=log_prob,
@@ -509,6 +514,8 @@ class DataParallelPPOActor(BasePPOActor):
                             config=self.config,
                             rollout_is_weights=rollout_is_weights,
                             branch_weight=branch_weight,
+                            dp_size=dp_world_size,
+                            dist_group=None,
                         )
                     else:
                         pg_loss, pg_metrics = policy_loss_fn(

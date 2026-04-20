@@ -493,6 +493,10 @@ class MegatronPPOActor(BasePPOActor):
                 rollout_is_weights = data.get("rollout_is_weights", None)
                 branch_weight = data.get("branch_weight", None)
                 if branch_weight is not None:
+                    if loss_mode != "vanilla":
+                        raise NotImplementedError(
+                            "TTPO branch_weight correction currently only supports loss_mode='vanilla'."
+                        )
                     pg_loss, pg_metrics = policy_loss_fn(
                         old_log_prob=old_log_prob,
                         log_prob=log_prob,
@@ -502,6 +506,8 @@ class MegatronPPOActor(BasePPOActor):
                         config=self.config,
                         rollout_is_weights=rollout_is_weights,
                         branch_weight=branch_weight,
+                        dp_size=mpu.get_data_parallel_world_size(),
+                        dist_group=mpu.get_data_parallel_group(),
                     )
                 else:
                     pg_loss, pg_metrics = policy_loss_fn(

@@ -236,6 +236,8 @@ class MegatronPPOCritic(BasePPOCritic):
                     cliprange_value=cliprange_value,
                     loss_agg_mode=self.config.loss_agg_mode,
                     branch_weight=branch_weight,
+                    dp_size=mpu.get_data_parallel_world_size(),
+                    dist_group=mpu.get_data_parallel_group(),
                 )
             else:
                 vf_loss, vf_clipfrac = core_algos.compute_value_loss(

@@ -23,7 +23,7 @@ rollout:
   top_p: 0.7
   prompt_length: 1536
   response_length: 512
-  c: 1.0  # TUCT exploration coefficient
+  c: 1.0  # OTRC exploration coefficient
   max_search_per_tree: 1  # max searches per tree per step
   # for vllm rollout
   dtype: bfloat16 # should align with FSDP

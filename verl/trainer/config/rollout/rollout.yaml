@@ -109,7 +109,7 @@ search: null
 # Maximum number of searches per tree per training iteration
 max_search_per_tree: 4
 
-# TUCT exploration coefficient
+# OTRC exploration coefficient
 c: 1.0
 
 # The over_sample_rate parameter controls the early termination threshold for training rollouts,

@@ -50,7 +50,7 @@ class DataParallelPPOCritic(BasePPOCritic):
         self.critic_optimizer = critic_optimizer
         self.use_remove_padding = self.config.model.get("use_remove_padding", False)
         print(f"Critic use_remove_padding={self.use_remove_padding}")
-
+        self.value_head_activation = self.config.get("value_head_activation", "none")
         self.ulysses_sequence_parallel_size = self.config.get("ulysses_sequence_parallel_size", 1)
         self.device_name = get_device_name()
 
@@ -119,6 +119,10 @@ class DataParallelPPOCritic(BasePPOCritic):
                 # pad it back
                 values = pad_input(values_rmpad, indices=indices, batch=batch, seqlen=seqlen).squeeze(-1)
                 values = values[:, -response_length - 1 : -1]
+                if self.value_head_activation == "sigmoid":
+                    values = torch.sigmoid(values)
+                elif self.value_head_activation == "tanh":
+                    values = torch.tanh(values)
             else:
                 output = self.critic_module(
                     input_ids=input_ids,
@@ -133,6 +137,10 @@ class DataParallelPPOCritic(BasePPOCritic):
                 else:
                     values = output.logits
                 values = values[:, -response_length - 1 : -1].squeeze(-1)
+                if self.value_head_activation == "sigmoid":
+                    values = torch.sigmoid(values)
+                elif self.value_head_activation == "tanh":
+                    values = torch.tanh(values)
             return values
 
     def _optimizer_step(self):

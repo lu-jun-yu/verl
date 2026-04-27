@@ -143,7 +143,6 @@ def create_huggingface_critic(model_name: str, override_config_kwargs=None, auto
     critic_module.lm_head = nn.Sequential(
         nn.Linear(critic_module.config.hidden_size, 1, dtype=torch_dtype), LambdaLayer(fn=squeeze)
     )
-    initialize_value_head(critic_module, std=1e-3, bias=0.5)
     return critic_module
 
 
@@ -617,36 +616,6 @@ def patch_valuehead_model(model) -> None:
     model.get_output_embeddings = MethodType(get_output_embeddings, model)
     model.can_generate = MethodType(can_generate, model)
     model._no_split_modules = getattr(model.pretrained_model, "_no_split_modules", [])
-
-
-def _get_value_head_linear(module: nn.Module) -> nn.Linear:
-    if isinstance(module, nn.Linear):
-        return module
-    if isinstance(module, nn.Sequential):
-        for child in module:
-            if isinstance(child, nn.Linear):
-                return child
-    raise ValueError(f"Unsupported value head module type: {type(module)}")
-
-
-def initialize_value_head(model: nn.Module, std: float = 1e-3, bias: float = 0.5) -> None:
-    if hasattr(model, "v_head"):
-        head = getattr(model.v_head, "summary", model.v_head)
-    elif hasattr(model, "score"):
-        head = model.score
-    elif hasattr(model, "classifier"):
-        head = model.classifier
-    elif hasattr(model, "lm_head"):
-        head = model.lm_head
-    else:
-        raise ValueError(f"Cannot find value head in model type {type(model)}")
-
-    head = _get_value_head_linear(head)
-    nn.init.normal_(head.weight, mean=0.0, std=std)
-    if head.bias is not None:
-        nn.init.constant_(head.bias, bias)
-
-
 def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_code):
     from transformers import AutoModelForCausalLM, AutoModelForTokenClassification, AutoModelForVision2Seq
 
@@ -658,7 +627,6 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
             attn_implementation="flash_attention_2",
             trust_remote_code=trust_remote_code,
         )
-        initialize_value_head(model, std=1e-3, bias=0.5)
         return model
     except BaseException as e:
         if not is_trl_available():
@@ -683,7 +651,6 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
     )
     model = AutoModelForCausalLMWithValueHead.from_pretrained(ori_model)
     patch_valuehead_model(model)
-    initialize_value_head(model, std=1e-3, bias=0.5)
     return model
 
 

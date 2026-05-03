@@ -404,6 +404,8 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_module.train()
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
+        # Pre-computed global denominator for OPTS-TTPO weighted-token-mean (None for non-OPTS algos).
+        weighted_inv_weight_sum = data.meta_info.get("weighted_inv_weight_sum", None)
 
         select_keys = [
             "responses",
@@ -514,8 +516,8 @@ class DataParallelPPOActor(BasePPOActor):
                             config=self.config,
                             rollout_is_weights=rollout_is_weights,
                             branch_weight=branch_weight,
+                            weighted_inv_weight_sum=weighted_inv_weight_sum,
                             dp_size=dp_world_size,
-                            dist_group=None,
                         )
                     else:
                         pg_loss, pg_metrics = policy_loss_fn(
@@ -545,7 +547,19 @@ class DataParallelPPOActor(BasePPOActor):
 
                     policy_loss = pg_loss
                     if calculate_entropy and entropy is not None:
-                        entropy_agg = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+                        if branch_weight is not None:
+                            entropy_agg = agg_loss(
+                                loss_mat=entropy,
+                                loss_mask=response_mask,
+                                loss_agg_mode="weighted-token-mean",
+                                branch_weight=branch_weight,
+                                weighted_inv_weight_sum=weighted_inv_weight_sum,
+                                dp_size=dp_world_size,
+                            )
+                        else:
+                            entropy_agg = agg_loss(
+                                loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode
+                            )
                         micro_batch_metrics["actor/entropy"] = entropy_agg.detach().item()
                         if entropy_coeff != 0:
                             policy_loss -= entropy_agg * entropy_coeff
@@ -556,12 +570,27 @@ class DataParallelPPOActor(BasePPOActor):
                         kld = kl_penalty(
                             logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type
                         )
-                        kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+                        if branch_weight is not None:
+                            kl_loss = agg_loss(
+                                loss_mat=kld,
+                                loss_mask=response_mask,
+                                loss_agg_mode="weighted-token-mean",
+                                branch_weight=branch_weight,
+                                weighted_inv_weight_sum=weighted_inv_weight_sum,
+                                dp_size=dp_world_size,
+                            )
+                        else:
+                            kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
                         micro_batch_metrics["actor/kl_loss"] = kl_loss.detach().item() * loss_scale_factor
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
+                    # OPTS-TTPO: agg_loss already uses the GLOBAL weighted-token-mean denominator,
+                    # so each micro-batch contribution is its true share of the global loss.
+                    # Override loss_scale_factor to 1.0 to skip the per-micro-batch shrink.
+                    if branch_weight is not None:
+                        loss_scale_factor = 1.0
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
                         loss = policy_loss * loss_scale_factor

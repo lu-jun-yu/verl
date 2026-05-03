@@ -206,6 +206,9 @@ class DataParallelPPOCritic(BasePPOCritic):
         self.critic_module.train()
         metrics = {}
 
+        # Pre-computed global denominator for OPTS-TTPO weighted-token-mean (None for non-OPTS algos).
+        weighted_inv_weight_sum = data.meta_info.get("weighted_inv_weight_sum", None)
+
         select_keys = ["input_ids", "responses", "response_mask", "attention_mask", "position_ids", "values", "returns"]
         # Include branch_weight for OPTS_TTPO gradient correction
         if "branch_weight" in data.batch.keys():
@@ -253,8 +256,8 @@ class DataParallelPPOCritic(BasePPOCritic):
                             cliprange_value=self.config.cliprange_value,
                             loss_agg_mode=self.config.loss_agg_mode,
                             branch_weight=branch_weight,
+                            weighted_inv_weight_sum=weighted_inv_weight_sum,
                             dp_size=dp_world_size,
-                            dist_group=None,
                         )
                     else:
                         vf_loss, vf_clipfrac = core_algos.compute_value_loss(
@@ -268,10 +271,13 @@ class DataParallelPPOCritic(BasePPOCritic):
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
                         loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
-                        loss = vf_loss * loss_scale_factor
                     else:
                         loss_scale_factor = 1 / self.gradient_accumulation
-                        loss = vf_loss * loss_scale_factor
+                    # OPTS-TTPO: vf_loss already uses the GLOBAL weighted-token-mean denominator,
+                    # so override loss_scale_factor to 1.0 to skip the per-micro-batch shrink.
+                    if branch_weight is not None:
+                        loss_scale_factor = 1.0
+                    loss = vf_loss * loss_scale_factor
 
                     loss.backward()
 

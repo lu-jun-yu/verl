@@ -506,8 +506,8 @@ class MegatronPPOActor(BasePPOActor):
                         config=self.config,
                         rollout_is_weights=rollout_is_weights,
                         branch_weight=branch_weight,
+                        weighted_inv_weight_sum=meta_info["weighted_inv_weight_sum"],
                         dp_size=mpu.get_data_parallel_world_size(),
-                        dist_group=mpu.get_data_parallel_group(),
                     )
                 else:
                     pg_loss, pg_metrics = policy_loss_fn(
@@ -684,6 +684,7 @@ class MegatronPPOActor(BasePPOActor):
                     "clip_ratio": self.config.clip_ratio,
                     "entropy_coeff": self.config.entropy_coeff,
                     "clip_ratio_c": clip_ratio_c,
+                    "weighted_inv_weight_sum": data.meta_info.get("weighted_inv_weight_sum", None),
                 }
 
             if RouterReplayHelper.is_r2_record_action(self.tf_config, vp_rank):

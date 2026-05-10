@@ -120,9 +120,9 @@ class DataParallelPPOCritic(BasePPOCritic):
                 values = pad_input(values_rmpad, indices=indices, batch=batch, seqlen=seqlen).squeeze(-1)
                 values = values[:, -response_length - 1 : -1]
                 if self.value_head_activation == "sigmoid":
-                    values = torch.sigmoid(values)
+                    values = torch.sigmoid(0.1 * values)
                 elif self.value_head_activation == "tanh":
-                    values = torch.tanh(values)
+                    values = torch.tanh(0.1 * values)
             else:
                 output = self.critic_module(
                     input_ids=input_ids,
@@ -138,9 +138,9 @@ class DataParallelPPOCritic(BasePPOCritic):
                     values = output.logits
                 values = values[:, -response_length - 1 : -1].squeeze(-1)
                 if self.value_head_activation == "sigmoid":
-                    values = torch.sigmoid(values)
+                    values = torch.sigmoid(0.1 * values)
                 elif self.value_head_activation == "tanh":
-                    values = torch.tanh(values)
+                    values = torch.tanh(0.1 * values)
             return values
 
     def _optimizer_step(self):

@@ -495,6 +495,9 @@ class DataParallelPPOActor(BasePPOActor):
 
                     # Extract branch_weight for OPTS_TTPO gradient correction
                     branch_weight = model_inputs.get("branch_weight", None)
+                    # OPTS-TTPO: agg_loss uses GLOBAL denominator, skip per-micro-batch shrink.
+                    if branch_weight is not None:
+                        loss_scale_factor = 1.0
 
                     # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
                     # clip_cov -> verl.trainer.ppo.core_algos.compute_policy_loss_clip_cov
@@ -586,11 +589,6 @@ class DataParallelPPOActor(BasePPOActor):
                         micro_batch_metrics["actor/kl_loss"] = kl_loss.detach().item() * loss_scale_factor
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
-                    # OPTS-TTPO: agg_loss already uses the GLOBAL weighted-token-mean denominator,
-                    # so each micro-batch contribution is its true share of the global loss.
-                    # Override loss_scale_factor to 1.0 to skip the per-micro-batch shrink.
-                    if branch_weight is not None:
-                        loss_scale_factor = 1.0
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
                         loss = policy_loss * loss_scale_factor

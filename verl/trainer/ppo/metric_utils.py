@@ -379,6 +379,18 @@ def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> flo
     return maj_val
 
 
+def _first_k_metric_sizes(n_resps: int) -> list[int]:
+    """Return powers-of-two k values plus the full response count."""
+    ns = [1]
+    n = 2
+    while n < n_resps:
+        ns.append(n)
+        n *= 2
+    if n_resps not in ns:
+        ns.append(n_resps)
+    return ns
+
+
 def process_validation_metrics(
     data_sources: list[str], sample_uids: list[str], infos_dict: dict[str, list[Any]], seed: int = 42
 ) -> dict[str, dict[str, dict[str, float]]]:
@@ -443,15 +455,22 @@ def process_validation_metrics(
                 n_resps = len(var_vals)
                 metric[f"mean@{n_resps}"] = np.mean(var_vals)
 
+                if var_name == "acc":
+                    for n in _first_k_metric_sizes(n_resps):
+                        first_n_vals = var_vals[:n]
+                        metric[f"avg@{n}"] = float(np.mean(first_n_vals))
+                        metric[f"pass@{n}"] = float(np.max(first_n_vals))
+                        if var2vals.get("pred", None) is not None:
+                            vote_data = [
+                                {"val": val, "pred": pred}
+                                for val, pred in zip(first_n_vals, var2vals["pred"][:n], strict=True)
+                            ]
+                            metric[f"cons@{n}"] = float(calc_maj_val(vote_data, vote_key="pred", val_key="val"))
+
                 if n_resps > 1:
                     metric[f"std@{n_resps}"] = np.std(var_vals)
 
-                    ns = []
-                    n = 2
-                    while n < n_resps:
-                        ns.append(n)
-                        n *= 2
-                    ns.append(n_resps)
+                    ns = _first_k_metric_sizes(n_resps)
 
                     for n in ns:
                         [(bon_mean, bon_std), (won_mean, won_std)] = bootstrap_metric(

@@ -724,8 +724,9 @@ class RayPPOTrainer:
 
         data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
         metric_dict = {}
-        target_acc_metric_names = ("avg@32", "pass@32", "cons@32")
-        target_reward_metric_names = ("mean@32",)
+        target_n = int(self.config.actor_rollout_ref.rollout.val_kwargs.n)
+        target_acc_metric_names = (f"avg@{target_n}", f"pass@{target_n}", f"cons@{target_n}")
+        target_reward_metric_names = (f"mean@{target_n}",)
         for data_source, var2metric2val in data_src2var2metric2val.items():
             acc_metric2val = var2metric2val.get("acc", {})
             for metric_name in target_acc_metric_names:

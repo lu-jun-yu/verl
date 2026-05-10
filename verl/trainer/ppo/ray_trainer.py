@@ -724,27 +724,17 @@ class RayPPOTrainer:
 
         data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
         metric_dict = {}
+        target_acc_metric_names = ("avg@32", "pass@32", "cons@32")
+        target_reward_metric_names = ("mean@32",)
         for data_source, var2metric2val in data_src2var2metric2val.items():
-            core_var = "acc" if "acc" in var2metric2val else "reward"
-            for var_name, metric2val in var2metric2val.items():
-                n_max = max([int(name.split("@")[-1].split("/")[0]) for name in metric2val.keys()])
-                for metric_name, metric_val in metric2val.items():
-                    if (
-                        (var_name == core_var)
-                        and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best", "avg", "pass", "cons"])
-                        and (f"@{n_max}" in metric_name)
-                    ):
-                        metric_sec = "val-core"
-                    else:
-                        metric_sec = "val-aux"
-                    pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
-                    metric_dict[pfx] = metric_val
-
-        if len(sample_turns) > 0:
-            sample_turns = np.concatenate(sample_turns)
-            metric_dict["val-aux/num_turns/min"] = sample_turns.min()
-            metric_dict["val-aux/num_turns/max"] = sample_turns.max()
-            metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
+            acc_metric2val = var2metric2val.get("acc", {})
+            for metric_name in target_acc_metric_names:
+                if metric_name in acc_metric2val:
+                    metric_dict[f"val-core/{data_source}/acc/{metric_name}"] = acc_metric2val[metric_name]
+            reward_metric2val = var2metric2val.get("reward", {})
+            for metric_name in target_reward_metric_names:
+                if metric_name in reward_metric2val:
+                    metric_dict[f"val-core/{data_source}/reward/{metric_name}"] = reward_metric2val[metric_name]
 
         return metric_dict
 

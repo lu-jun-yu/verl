@@ -349,6 +349,8 @@ def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> flo
 
     This function identifies the most common value for a specified vote key
     in the data, then returns the corresponding value for that majority vote.
+    Empty votes are ignored, and mathematically equivalent answer strings are
+    merged before voting.
 
     Args:
         data: List of dictionaries, where each dictionary contains both vote_key and val_key.
@@ -367,16 +369,46 @@ def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> flo
         >>> calc_maj_val(data, vote_key="pred", val_key="val")
         0.9  # Returns the first "val" for the majority vote "A"
     """
-    vote2vals = defaultdict(list)
+    vote_groups = []
     for d in data:
-        vote2vals[d[vote_key]].append(d[val_key])
+        vote = d[vote_key]
+        if not _is_valid_vote(vote):
+            continue
 
-    vote2cnt = {k: len(v) for k, v in vote2vals.items()}
-    maj_vote = max(vote2cnt, key=vote2cnt.get)
+        for group in vote_groups:
+            if _votes_equivalent(vote, group["vote"]):
+                group["vals"].append(d[val_key])
+                break
+        else:
+            vote_groups.append({"vote": vote, "vals": [d[val_key]]})
 
-    maj_val = vote2vals[maj_vote][0]
+    if not vote_groups:
+        return 0.0
 
-    return maj_val
+    # Ties keep first-seen behavior, matching Counter.most_common and the old
+    # insertion-order max over raw vote strings.
+    maj_group = max(vote_groups, key=lambda group: len(group["vals"]))
+    return maj_group["vals"][0]
+
+
+def _is_valid_vote(vote: Any) -> bool:
+    return vote is not None and str(vote).strip() != ""
+
+
+def _normalize_vote_for_fallback(vote: Any) -> str:
+    return "".join(str(vote).strip().replace("$", "").replace(",", "").split())
+
+
+def _votes_equivalent(lhs: Any, rhs: Any) -> bool:
+    if _normalize_vote_for_fallback(lhs) == _normalize_vote_for_fallback(rhs):
+        return True
+
+    try:
+        from math_verify import parse, verify
+
+        return bool(verify(parse(str(lhs)), parse(str(rhs))))
+    except Exception:
+        return False
 
 
 def _first_k_metric_sizes(n_resps: int) -> list[int]:

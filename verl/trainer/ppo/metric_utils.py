@@ -400,6 +400,15 @@ def _normalize_vote_for_fallback(vote: Any) -> str:
 
 
 def _votes_equivalent(lhs: Any, rhs: Any) -> bool:
+    if lhs == rhs:
+        return True
+
+    # Validation bootstrapping can vote on precomputed integer equivalence
+    # classes. Different class ids are already known to be inequivalent, so
+    # avoid falling through to math_verify in the hot loop.
+    if not isinstance(lhs, str) and not isinstance(rhs, str):
+        return False
+
     if _normalize_vote_for_fallback(lhs) == _normalize_vote_for_fallback(rhs):
         return True
 
@@ -409,6 +418,80 @@ def _votes_equivalent(lhs: Any, rhs: Any) -> bool:
         return bool(verify(parse(str(lhs)), parse(str(rhs))))
     except Exception:
         return False
+
+
+def _vote_equivalence_classes(votes: list[Any]) -> list[int | None]:
+    classes: list[int | None] = []
+    representatives: list[Any] = []
+    try:
+        from math_verify import parse, verify  # type: ignore[import]
+
+        have_math_verify = True
+    except Exception:
+        parse = verify = None  # type: ignore[assignment]
+        have_math_verify = False
+
+    parse_cache: dict[str, Any] = {}
+
+    def _parse_cached(raw: Any) -> Any:
+        key = str(raw)
+        if key in parse_cache:
+            return parse_cache[key]
+        try:
+            parsed = parse(key) if have_math_verify else None
+        except Exception:
+            parsed = None
+        parse_cache[key] = parsed
+        return parsed
+
+    rep_parsed: list[Any] = []
+    rep_norm: list[str] = []
+
+    for vote in votes:
+        if not _is_valid_vote(vote):
+            classes.append(None)
+            continue
+
+        matched_class: int | None = None
+        vote_norm = _normalize_vote_for_fallback(vote) if isinstance(vote, str) else None
+        vote_parsed_lazy: Any = ...
+
+        for class_id, representative in enumerate(representatives):
+            if vote == representative:
+                matched_class = class_id
+                break
+            if not isinstance(vote, str) and not isinstance(representative, str):
+                continue
+            if (
+                vote_norm is not None
+                and isinstance(representative, str)
+                and rep_norm[class_id] == vote_norm
+            ):
+                matched_class = class_id
+                break
+            if not have_math_verify:
+                continue
+            if vote_parsed_lazy is ...:
+                vote_parsed_lazy = _parse_cached(vote)
+            rep_parsed_val = rep_parsed[class_id]
+            if rep_parsed_val is None or vote_parsed_lazy is None:
+                continue
+            try:
+                if bool(verify(rep_parsed_val, vote_parsed_lazy)):
+                    matched_class = class_id
+                    break
+            except Exception:
+                continue
+
+        if matched_class is not None:
+            classes.append(matched_class)
+        else:
+            representatives.append(vote)
+            rep_parsed.append(_parse_cached(vote) if isinstance(vote, str) else None)
+            rep_norm.append(vote_norm if vote_norm is not None else "")
+            classes.append(len(representatives) - 1)
+
+    return classes
 
 
 def _first_k_metric_sizes(n_resps: int) -> list[int]:
@@ -424,7 +507,11 @@ def _first_k_metric_sizes(n_resps: int) -> list[int]:
 
 
 def process_validation_metrics(
-    data_sources: list[str], sample_uids: list[str], infos_dict: dict[str, list[Any]], seed: int = 42
+    data_sources: list[str],
+    sample_uids: list[str],
+    infos_dict: dict[str, list[Any]],
+    seed: int = 42,
+    compute_bootstrap: bool = True,
 ) -> dict[str, dict[str, dict[str, float]]]:
     """
     Process validation metrics into a structured format with statistical analysis.
@@ -439,6 +526,8 @@ def process_validation_metrics(
         sample_uids: List of sample uids corresponding to each sample.
         infos_dict: Dictionary mapping variable names to lists of values for each sample.
         seed: Random seed for bootstrap sampling. Defaults to 42.
+        compute_bootstrap: When False, skip the std@/best@/worst@/maj@ bootstrap
+            block. Safe for callers that only consume avg@/pass@/cons@/mean@.
 
     Returns:
         A nested dictionary with the structure:
@@ -486,20 +575,24 @@ def process_validation_metrics(
                 metric = {}
                 n_resps = len(var_vals)
                 metric[f"mean@{n_resps}"] = np.mean(var_vals)
+                pred_classes = None
 
                 if var_name == "acc":
+                    pred_vals = var2vals.get("pred", None)
+                    pred_classes = _vote_equivalence_classes(pred_vals) if pred_vals is not None else None
+
                     for n in _first_k_metric_sizes(n_resps):
                         first_n_vals = var_vals[:n]
                         metric[f"avg@{n}"] = float(np.mean(first_n_vals))
                         metric[f"pass@{n}"] = float(np.max(first_n_vals))
-                        if var2vals.get("pred", None) is not None:
+                        if pred_classes is not None:
                             vote_data = [
                                 {"val": val, "pred": pred}
-                                for val, pred in zip(first_n_vals, var2vals["pred"][:n], strict=True)
+                                for val, pred in zip(first_n_vals, pred_classes[:n], strict=True)
                             ]
                             metric[f"cons@{n}"] = float(calc_maj_val(vote_data, vote_key="pred", val_key="val"))
 
-                if n_resps > 1:
+                if n_resps > 1 and compute_bootstrap:
                     metric[f"std@{n_resps}"] = np.std(var_vals)
 
                     ns = _first_k_metric_sizes(n_resps)
@@ -510,9 +603,9 @@ def process_validation_metrics(
                         )
                         metric[f"best@{n}/mean"], metric[f"best@{n}/std"] = bon_mean, bon_std
                         metric[f"worst@{n}/mean"], metric[f"worst@{n}/std"] = won_mean, won_std
-                        if var2vals.get("pred", None) is not None:
+                        if pred_classes is not None:
                             vote_data = [
-                                {"val": val, "pred": pred} for val, pred in zip(var_vals, var2vals["pred"], strict=True)
+                                {"val": val, "pred": pred} for val, pred in zip(var_vals, pred_classes, strict=True)
                             ]
                             [(maj_n_mean, maj_n_std)] = bootstrap_metric(
                                 data=vote_data,

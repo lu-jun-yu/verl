@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import multiprocessing as mp
+import os
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 from typing import Any
 
 import torch
@@ -21,6 +24,55 @@ from verl import DataProto
 from verl.utils.reward_score import default_compute_score
 from verl.workers.reward_manager import register
 from verl.workers.reward_manager.abstract import AbstractRewardManager
+
+
+_PARALLEL_THRESHOLD = int(os.environ.get("VERL_REWARD_PARALLEL_THRESHOLD", "256"))
+_PARALLEL_MAX_WORKERS = int(
+    os.environ.get("VERL_REWARD_NUM_WORKERS", str(min(32, max(1, (os.cpu_count() or 4) // 2))))
+)
+
+_POOL = None
+_POOL_KEY = None
+_WORKER_FN = None
+
+
+def _worker_init(fn_bytes: bytes) -> None:
+    import cloudpickle
+
+    global _WORKER_FN
+    _WORKER_FN = cloudpickle.loads(fn_bytes)
+
+
+def _worker_score(args: tuple) -> Any:
+    data_source, response_str, ground_truth, extra_info = args
+    return _WORKER_FN(
+        data_source=data_source,
+        solution_str=response_str,
+        ground_truth=ground_truth,
+        extra_info=extra_info,
+    )
+
+
+def _get_or_create_pool(compute_score) -> ProcessPoolExecutor:
+    global _POOL, _POOL_KEY
+    key = id(compute_score)
+    if _POOL is not None and _POOL_KEY == key:
+        return _POOL
+    if _POOL is not None:
+        _POOL.shutdown(wait=False, cancel_futures=True)
+        _POOL = None
+    import cloudpickle
+
+    fn_bytes = cloudpickle.dumps(compute_score)
+    ctx = mp.get_context("spawn")
+    _POOL = ProcessPoolExecutor(
+        max_workers=_PARALLEL_MAX_WORKERS,
+        mp_context=ctx,
+        initializer=_worker_init,
+        initargs=(fn_bytes,),
+    )
+    _POOL_KEY = key
+    return _POOL
 
 
 @register("naive")
@@ -54,24 +106,23 @@ class NaiveRewardManager(AbstractRewardManager):
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info = defaultdict(list)
 
-        already_print_data_sources = {}
+        n = len(data)
+        valid_response_lengths: list[int] = [0] * n
+        score_args: list[tuple] = [None] * n  # type: ignore[list-item]
+        examine_payloads: list[tuple] = []  # (data_source, prompt_ids, response_str)
+        examine_budget: dict[Any, int] = defaultdict(int)
 
-        for i in range(len(data)):
-            data_item = data[i]  # DataProtoItem
+        for i in range(n):
+            data_item = data[i]
 
             prompt_ids = data_item.batch["prompts"]
-
             prompt_length = prompt_ids.shape[-1]
 
-            valid_prompt_length = data_item.batch["attention_mask"][:prompt_length].sum()
-            valid_prompt_ids = prompt_ids[-valid_prompt_length:]
-
             response_ids = data_item.batch["responses"]
-            valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+            valid_response_length = int(data_item.batch["attention_mask"][prompt_length:].sum())
             valid_response_ids = response_ids[:valid_response_length]
+            valid_response_lengths[i] = valid_response_length
 
-            # decode
-            prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
             response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
 
             ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
@@ -82,36 +133,32 @@ class NaiveRewardManager(AbstractRewardManager):
             extra_info["num_turns"] = num_turns
             extra_info["rollout_reward_scores"] = rollout_reward_scores
 
-            score = self.compute_score(
-                data_source=data_source,
-                solution_str=response_str,
-                ground_truth=ground_truth,
-                extra_info=extra_info,
-            )
+            score_args[i] = (data_source, response_str, ground_truth, extra_info)
 
+            if examine_budget[data_source] < self.num_examine:
+                examine_budget[data_source] += 1
+                valid_prompt_length = int(data_item.batch["attention_mask"][:prompt_length].sum())
+                valid_prompt_ids = prompt_ids[-valid_prompt_length:]
+                examine_payloads.append((data_source, valid_prompt_ids, response_str, ground_truth))
+
+        scores = self._compute_scores(score_args)
+
+        for i, score in enumerate(scores):
             if isinstance(score, dict):
                 reward = score["score"]
-                # Store the information including original reward
                 for key, value in score.items():
                     reward_extra_info[key].append(value)
             else:
                 reward = score
+            valid_response_length = valid_response_lengths[i]
+            if valid_response_length > 0:
+                reward_tensor[i, valid_response_length - 1] = reward
 
-            reward_tensor[i, valid_response_length - 1] = reward
-
-            if data_source not in already_print_data_sources:
-                already_print_data_sources[data_source] = 0
-
-            if already_print_data_sources[data_source] < self.num_examine:
-                already_print_data_sources[data_source] += 1
-                print("[prompt]", prompt_str)
-                print("[response]", response_str)
-                print("[ground_truth]", ground_truth)
-                if isinstance(score, dict):
-                    for key, value in score.items():
-                        print(f"[{key}]", value)
-                else:
-                    print("[score]", score)
+        for data_source, prompt_ids_t, response_str, ground_truth in examine_payloads:
+            prompt_str = self.tokenizer.decode(prompt_ids_t, skip_special_tokens=True)
+            print("[prompt]", prompt_str)
+            print("[response]", response_str)
+            print("[ground_truth]", ground_truth)
 
         if return_dict:
             return {
@@ -120,3 +167,30 @@ class NaiveRewardManager(AbstractRewardManager):
             }
         else:
             return reward_tensor
+
+    def _compute_scores(self, score_args: list[tuple]) -> list[Any]:
+        n = len(score_args)
+        if n < _PARALLEL_THRESHOLD or _PARALLEL_MAX_WORKERS <= 1:
+            return [
+                self.compute_score(
+                    data_source=ds,
+                    solution_str=resp,
+                    ground_truth=gt,
+                    extra_info=ei,
+                )
+                for (ds, resp, gt, ei) in score_args
+            ]
+        try:
+            pool = _get_or_create_pool(self.compute_score)
+            return list(pool.map(_worker_score, score_args, chunksize=max(1, n // (_PARALLEL_MAX_WORKERS * 4))))
+        except Exception as e:
+            print(f"[NaiveRewardManager] parallel scoring failed ({e!r}), falling back to serial")
+            return [
+                self.compute_score(
+                    data_source=ds,
+                    solution_str=resp,
+                    ground_truth=gt,
+                    extra_info=ei,
+                )
+                for (ds, resp, gt, ei) in score_args
+            ]

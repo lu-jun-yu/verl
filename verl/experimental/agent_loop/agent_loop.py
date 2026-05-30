@@ -339,8 +339,12 @@ class AgentLoopWorkerBase:
             responses:     |<- LLM generation ->|<- tool_calls ->|<- LLM generation ->|<- padding ->|
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
-        # Continuation mode: generate from input_ids instead of raw_prompt
-        if "round_idx" in batch.meta_info and batch.meta_info["round_idx"] >= 1:
+        # Continuation mode (OPTS tree search): generate from input_ids. Validation
+        # has no prefix / raw_prompt_len, so it always takes the normal path below.
+        if (
+            self.config.actor_rollout_ref.rollout.get("search", None) == "opts"
+            and not batch.meta_info.get("validate", False)
+        ):
             return await self._generate_from_input_ids(batch)
 
         config = self.config.actor_rollout_ref.rollout

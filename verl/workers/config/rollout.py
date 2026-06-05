@@ -129,7 +129,6 @@ class RolloutConfig(BaseConfig):
     do_sample: bool = True
     n: int = 1
     max_search_per_tree: int = 4
-    c: float = 1.0
     search: str = None
     repetition_penalty: float = 1.0
 

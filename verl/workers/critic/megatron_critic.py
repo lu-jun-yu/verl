@@ -236,7 +236,7 @@ class MegatronPPOCritic(BasePPOCritic):
                     cliprange_value=cliprange_value,
                     loss_agg_mode=self.config.loss_agg_mode,
                     branch_weight=branch_weight,
-                    weighted_inv_weight_sum=meta_info["weighted_inv_weight_sum"],
+                    weighted_weight_sum=meta_info["weighted_weight_sum"],
                     dp_size=mpu.get_data_parallel_world_size(),
                 )
             else:
@@ -281,7 +281,7 @@ class MegatronPPOCritic(BasePPOCritic):
             return output, partial(
                 loss_func,
                 data=batch,
-                meta_info={"weighted_inv_weight_sum": data.meta_info.get("weighted_inv_weight_sum", None)},
+                meta_info={"weighted_weight_sum": data.meta_info.get("weighted_weight_sum", None)},
             )
 
         # batch should be a list of batches inside micro-batches

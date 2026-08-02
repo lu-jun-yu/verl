@@ -207,7 +207,7 @@ class DataParallelPPOCritic(BasePPOCritic):
         metrics = {}
 
         # Pre-computed global denominator for OPTS-TTPO weighted-token-mean (None for non-OPTS algos).
-        weighted_inv_weight_sum = data.meta_info.get("weighted_inv_weight_sum", None)
+        weighted_weight_sum = data.meta_info.get("weighted_weight_sum", None)
 
         select_keys = ["input_ids", "responses", "response_mask", "attention_mask", "position_ids", "values", "returns"]
         # Include branch_weight for OPTS_TTPO gradient correction
@@ -256,7 +256,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                             cliprange_value=self.config.cliprange_value,
                             loss_agg_mode=self.config.loss_agg_mode,
                             branch_weight=branch_weight,
-                            weighted_inv_weight_sum=weighted_inv_weight_sum,
+                            weighted_weight_sum=weighted_weight_sum,
                             dp_size=dp_world_size,
                         )
                     else:

@@ -405,7 +405,7 @@ class DataParallelPPOActor(BasePPOActor):
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
         # Pre-computed global denominator for OPTS-TTPO weighted-token-mean (None for non-OPTS algos).
-        weighted_inv_weight_sum = data.meta_info.get("weighted_inv_weight_sum", None)
+        weighted_weight_sum = data.meta_info.get("weighted_weight_sum", None)
 
         select_keys = [
             "responses",
@@ -519,7 +519,7 @@ class DataParallelPPOActor(BasePPOActor):
                             config=self.config,
                             rollout_is_weights=rollout_is_weights,
                             branch_weight=branch_weight,
-                            weighted_inv_weight_sum=weighted_inv_weight_sum,
+                            weighted_weight_sum=weighted_weight_sum,
                             dp_size=dp_world_size,
                         )
                     else:
@@ -556,7 +556,7 @@ class DataParallelPPOActor(BasePPOActor):
                                 loss_mask=response_mask,
                                 loss_agg_mode="weighted-token-mean",
                                 branch_weight=branch_weight,
-                                weighted_inv_weight_sum=weighted_inv_weight_sum,
+                                weighted_weight_sum=weighted_weight_sum,
                                 dp_size=dp_world_size,
                             )
                         else:
@@ -579,7 +579,7 @@ class DataParallelPPOActor(BasePPOActor):
                                 loss_mask=response_mask,
                                 loss_agg_mode="weighted-token-mean",
                                 branch_weight=branch_weight,
-                                weighted_inv_weight_sum=weighted_inv_weight_sum,
+                                weighted_weight_sum=weighted_weight_sum,
                                 dp_size=dp_world_size,
                             )
                         else:

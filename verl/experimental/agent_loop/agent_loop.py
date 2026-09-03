@@ -888,8 +888,10 @@ class AgentLoopManager:
         self._init_agent_loop_workers()
 
         # Initially we're in sleep mode.
+        self._is_awake = True
         if self.config.actor_rollout_ref.rollout.free_cache_engine:
             self.sleep()
+            self._is_awake = False
 
     def _initialize_llm_servers(self):
         rollout_world_size = (
@@ -947,11 +949,14 @@ class AgentLoopManager:
                 ).remote(self.config, self.server_handles, self.reward_router_address)
             )
 
-    def generate_sequences(self, prompts: DataProto) -> DataProto:
+    def generate_sequences(self, prompts: DataProto, sleep_after: bool = True) -> DataProto:
         """Split input batch and dispatch to agent loop workers.
 
         Args:
             prompts (DataProto): Input batch.
+            sleep_after (bool): Pass False to keep the rollout engine awake after
+                generation (only valid while policy weights are unchanged, e.g.
+                between OPTS tree-search rounds).
 
         Returns:
             DataProto: Output batch.
@@ -959,9 +964,12 @@ class AgentLoopManager:
 
         # Fix for Issue #4147: Always call wake_up() to ensure weight sync
         # The wake_up()/sleep() methods internally check free_cache_engine
-        self.wake_up()
-        if self.reward_model_manager:
-            self.reward_model_manager.wake_up()
+        free_cache_engine = self.config.actor_rollout_ref.rollout.free_cache_engine
+        if not self._is_awake or not free_cache_engine:  # wake_up() also syncs weights
+            self.wake_up()
+            if self.reward_model_manager:
+                self.reward_model_manager.wake_up()
+            self._is_awake = True
 
         chunkes = prompts.chunk(len(self.agent_loop_workers))
         outputs = ray.get(
@@ -972,9 +980,11 @@ class AgentLoopManager:
         )
         output = DataProto.concat(outputs)
         # Fix for Issue #4147: Always call sleep() to ensure proper cleanup
-        self.sleep()
-        if self.reward_model_manager:
-            self.reward_model_manager.sleep()
+        if sleep_after:
+            self.sleep()
+            if self.reward_model_manager:
+                self.reward_model_manager.sleep()
+            self._is_awake = False
 
         # calculate performance metrics
         metrics = [output.meta_info.pop("metrics") for output in outputs]  # List[List[Dict[str, str]]]

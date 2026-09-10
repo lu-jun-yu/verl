@@ -624,6 +624,8 @@ class AgentLoopWorkerBase:
                 full_response_ids = input_ids[0, start_pos:end_pos]
                 valid_mask = attention_mask[0, start_pos:end_pos].bool()
                 full_response_str = self.tokenizer.decode(full_response_ids[valid_mask], skip_special_tokens=True)
+                # Let OPTS reuse the reward text instead of decoding it again on the driver.
+                output.extra_fields["full_response_str"] = full_response_str
                 extra_info = kwargs.get("extra_info", {})
                 if not isinstance(extra_info, dict):
                     extra_info = {}

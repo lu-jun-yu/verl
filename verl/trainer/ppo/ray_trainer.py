@@ -723,11 +723,13 @@ class RayPPOTrainer:
         data_sources = np.concatenate(data_source_lst, axis=0)
 
         data_src2var2metric2val = process_validation_metrics(
-            data_sources, sample_uids, reward_extra_infos_dict, compute_bootstrap=False
+            data_sources, sample_uids,
+            {key: values for key, values in reward_extra_infos_dict.items() if key != "pred"},
+            compute_bootstrap=False,
         )
         metric_dict = {}
         target_n = int(self.config.actor_rollout_ref.rollout.val_kwargs.n)
-        target_acc_metric_names = (f"avg@{target_n}", f"pass@{target_n}", f"cons@{target_n}")
+        target_acc_metric_names = (f"avg@{target_n}", f"pass@{target_n}")
         target_reward_metric_names = (f"mean@{target_n}",)
         for data_source, var2metric2val in data_src2var2metric2val.items():
             acc_metric2val = var2metric2val.get("acc", {})

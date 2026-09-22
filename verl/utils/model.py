@@ -616,6 +616,31 @@ def patch_valuehead_model(model) -> None:
     model.get_output_embeddings = MethodType(get_output_embeddings, model)
     model.can_generate = MethodType(can_generate, model)
     model._no_split_modules = getattr(model.pretrained_model, "_no_split_modules", [])
+
+
+def initialize_value_head(model: nn.Module, std: float = 1e-3) -> None:
+    """Initialize the scalar value head near zero without a task-specific prior."""
+    if hasattr(model, "v_head"):
+        head = getattr(model.v_head, "summary", model.v_head)
+    elif hasattr(model, "score"):
+        head = model.score
+    elif hasattr(model, "classifier"):
+        head = model.classifier
+    elif hasattr(model, "lm_head"):
+        head = model.lm_head
+    else:
+        raise ValueError(f"Cannot find value head in model type {type(model)}")
+
+    if isinstance(head, nn.Sequential):
+        head = next((module for module in head if isinstance(module, nn.Linear)), None)
+    if not isinstance(head, nn.Linear):
+        raise ValueError(f"Unsupported value head module type: {type(head)}")
+
+    nn.init.normal_(head.weight, mean=0.0, std=std)
+    if head.bias is not None:
+        nn.init.zeros_(head.bias)
+
+
 def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_code):
     from transformers import AutoModelForCausalLM, AutoModelForTokenClassification, AutoModelForVision2Seq
 
@@ -627,6 +652,7 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
             attn_implementation="flash_attention_2",
             trust_remote_code=trust_remote_code,
         )
+        initialize_value_head(model)
         return model
     except BaseException as e:
         if not is_trl_available():
@@ -651,6 +677,7 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
     )
     model = AutoModelForCausalLMWithValueHead.from_pretrained(ori_model)
     patch_valuehead_model(model)
+    initialize_value_head(model)
     return model
 
 

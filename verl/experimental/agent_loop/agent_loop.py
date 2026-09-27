@@ -434,7 +434,11 @@ class AgentLoopWorkerBase:
                 tokenizer=self.tokenizer,
                 processor=self.processor,
             )
-            output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
+            request_sampling_params = sampling_params
+            if "sampling_seed" in kwargs:
+                request_sampling_params = dict(sampling_params)
+                request_sampling_params["seed"] = int(kwargs["sampling_seed"])
+            output: AgentLoopOutput = await agent_loop.run(request_sampling_params, **kwargs)
             return await self._agent_loop_postprocess(output, **kwargs)
 
     async def _run_agent_loop_from_input_ids(
@@ -467,7 +471,13 @@ class AgentLoopWorkerBase:
                 tokenizer=self.tokenizer,
                 processor=self.processor,
             )
-            output: AgentLoopOutput = await agent_loop.run_from_input_ids(sampling_params, prompt_ids, **kwargs)
+            request_sampling_params = sampling_params
+            if "sampling_seed" in kwargs:
+                request_sampling_params = dict(sampling_params)
+                request_sampling_params["seed"] = int(kwargs["sampling_seed"])
+            output: AgentLoopOutput = await agent_loop.run_from_input_ids(
+                request_sampling_params, prompt_ids, **kwargs
+            )
             return await self._agent_loop_postprocess(output, **kwargs)
 
     async def _agent_loop_postprocess(self, output, **kwargs) -> _InternalAgentLoopOutput:

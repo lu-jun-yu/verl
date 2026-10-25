@@ -51,10 +51,17 @@ class DataParallelPPOCritic(BasePPOCritic):
         self.use_remove_padding = self.config.model.get("use_remove_padding", False)
         print(f"Critic use_remove_padding={self.use_remove_padding}")
         self.value_head_activation = self.config.get("value_head_activation", "none")
+        self.value_loss_type = self.config.get("value_loss_type", "auto")
+        if self.value_loss_type == "auto":
+            self.value_loss_type = "bce" if self.value_head_activation == "sigmoid" else "mse"
+        if self.value_loss_type not in {"mse", "bce"}:
+            raise ValueError(f"Unsupported critic value_loss_type: {self.value_loss_type}")
+        if self.value_loss_type == "bce" and self.value_head_activation != "sigmoid":
+            raise ValueError("BCE critic loss requires value_head_activation=sigmoid")
         self.ulysses_sequence_parallel_size = self.config.get("ulysses_sequence_parallel_size", 1)
         self.device_name = get_device_name()
 
-    def _forward_micro_batch(self, micro_batch):
+    def _forward_micro_batch(self, micro_batch, return_logits=False):
         response_length = micro_batch["responses"].size(-1)
         multi_modal_inputs = {}
         if "multi_modal_inputs" in micro_batch.keys():
@@ -119,10 +126,6 @@ class DataParallelPPOCritic(BasePPOCritic):
                 # pad it back
                 values = pad_input(values_rmpad, indices=indices, batch=batch, seqlen=seqlen).squeeze(-1)
                 values = values[:, -response_length - 1 : -1]
-                if self.value_head_activation == "sigmoid":
-                    values = torch.sigmoid(values.float())
-                elif self.value_head_activation == "tanh":
-                    values = torch.tanh(values)
             else:
                 output = self.critic_module(
                     input_ids=input_ids,
@@ -137,11 +140,12 @@ class DataParallelPPOCritic(BasePPOCritic):
                 else:
                     values = output.logits
                 values = values[:, -response_length - 1 : -1].squeeze(-1)
-                if self.value_head_activation == "sigmoid":
-                    values = torch.sigmoid(values.float())
-                elif self.value_head_activation == "tanh":
-                    values = torch.tanh(values)
-            return values
+            logits = values.float() if self.value_head_activation == "sigmoid" else values
+            if self.value_head_activation == "sigmoid":
+                values = torch.sigmoid(logits)
+            elif self.value_head_activation == "tanh":
+                values = torch.tanh(values)
+            return (values, logits) if return_logits else values
 
     def _optimizer_step(self):
         assert self.config.grad_clip is not None
@@ -243,7 +247,12 @@ class DataParallelPPOCritic(BasePPOCritic):
                     values = model_inputs["values"]
                     returns = model_inputs["returns"]
 
-                    vpreds = self._forward_micro_batch(model_inputs)
+                    if self.value_loss_type == "bce":
+                        vpreds, logits = self._forward_micro_batch(model_inputs, return_logits=True)
+                        loss_kwargs = {"value_loss_type": "bce", "logits": logits}
+                    else:
+                        vpreds = self._forward_micro_batch(model_inputs)
+                        loss_kwargs = {}
                     # Extract branch_weight for OPTS_TTPO gradient correction
                     branch_weight = model_inputs.get("branch_weight", None)
                     if branch_weight is not None:
@@ -258,6 +267,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                             branch_weight=branch_weight,
                             batch_num_tokens=batch_num_tokens,
                             dp_size=dp_world_size,
+                            **loss_kwargs,
                         )
                     else:
                         vf_loss, vf_clipfrac = core_algos.compute_value_loss(
@@ -267,6 +277,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                             response_mask=response_mask,
                             cliprange_value=self.config.cliprange_value,
                             loss_agg_mode=self.config.loss_agg_mode,
+                            **loss_kwargs,
                         )
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz

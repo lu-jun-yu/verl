@@ -26,6 +26,7 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from omegaconf import DictConfig
 
 import verl.utils.torch_functional as verl_F
@@ -1558,6 +1559,47 @@ def compute_entropy_loss(logits, response_mask, loss_agg_mode: str = "token-mean
     return entropy_loss
 
 
+def compute_bce_value_loss_terms(
+    logits: torch.Tensor | None,
+    returns: torch.Tensor,
+    values: torch.Tensor,
+    response_mask: torch.Tensor,
+    cliprange_value: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute per-token BCE losses before and after value clipping.
+
+    Use the original TreeGAE soft targets. Padded entries are neutralized
+    before evaluating BCE.
+
+    Args:
+        logits (torch.Tensor): Raw head outputs, shape (batch_size, response_length).
+        returns (torch.Tensor): Fixed return targets, shape (batch_size, response_length).
+        values (torch.Tensor): Old value predictions, shape (batch_size, response_length).
+        response_mask (torch.Tensor): Mask identifying valid response tokens.
+        cliprange_value (float): Clip range for value prediction updates.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: Unclipped and clipped per-token losses.
+    """
+    if logits is None:
+        raise ValueError("BCE critic loss requires raw value-head logits")
+    mask = response_mask.bool()
+    targets = torch.where(mask, returns.detach().float(), 0.0)
+    logits = torch.where(mask, logits.float(), 0.0)
+    old_values = torch.where(mask, values.detach().float(), 0.0)
+    predictions = torch.sigmoid(logits)
+    lower, upper = old_values - cliprange_value, old_values + cliprange_value
+    clipped = predictions.clamp(min=lower, max=upper)
+    eps = torch.finfo(torch.float32).eps
+    clipped_logits = torch.logit(clipped.clamp(eps, 1.0 - eps))
+    # Preserve raw logits where clipping is inactive, including saturated heads.
+    clipped_logits = torch.where((predictions < lower) | (predictions > upper), clipped_logits, logits)
+    return (
+        F.binary_cross_entropy_with_logits(logits, targets, reduction="none"),
+        F.binary_cross_entropy_with_logits(clipped_logits, targets, reduction="none"),
+    )
+
+
 def compute_value_loss(
     vpreds: torch.Tensor,
     returns: torch.Tensor,
@@ -1565,9 +1607,11 @@ def compute_value_loss(
     response_mask: torch.Tensor,
     cliprange_value: float,
     loss_agg_mode: str = "token-mean",
+    value_loss_type: str = "mse",
+    logits: torch.Tensor | None = None,
 ):
     """
-    Compute the clipped value-function loss for PPO.
+    Compute clipped MSE or BCE value loss for PPO.
 
     Copied from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1151
 
@@ -1584,6 +1628,10 @@ def compute_value_loss(
             Clip range for value prediction updates.
         loss_agg_mode (str, optional):
             Aggregation mode for `agg_loss`. Defaults to "token-mean".
+        value_loss_type (str):
+            "mse" or "bce"; the critic worker selects the head-dependent default.
+        logits (torch.Tensor, optional):
+            Raw sigmoid-head logits required for BCE with the original soft return targets.
 
     Returns:
         vf_loss (torch.FloatTensor):
@@ -1591,11 +1639,24 @@ def compute_value_loss(
         vf_clipfrac (float):
             Fraction of elements where the clipped loss was used.
     """
-    vpredclipped = verl_F.clip_by_value(vpreds, values - cliprange_value, values + cliprange_value)
-    vf_losses1 = (vpreds - returns) ** 2
-    vf_losses2 = (vpredclipped - returns) ** 2
+    if value_loss_type == "bce":
+        vf_losses1, vf_losses2 = compute_bce_value_loss_terms(
+            logits=logits,
+            returns=returns,
+            values=values,
+            response_mask=response_mask,
+            cliprange_value=cliprange_value,
+        )
+        loss_scale = 1.0
+    elif value_loss_type == "mse":
+        vpredclipped = verl_F.clip_by_value(vpreds, values - cliprange_value, values + cliprange_value)
+        vf_losses1 = (vpreds - returns) ** 2
+        vf_losses2 = (vpredclipped - returns) ** 2
+        loss_scale = 0.5
+    else:
+        raise ValueError(f"Unsupported critic value_loss_type: {value_loss_type}")
     clipped_vf_losses = torch.max(vf_losses1, vf_losses2)
-    vf_loss = 0.5 * agg_loss(loss_mat=clipped_vf_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+    vf_loss = loss_scale * agg_loss(loss_mat=clipped_vf_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
     vf_clipfrac = verl_F.masked_mean(torch.gt(vf_losses2, vf_losses1).float(), response_mask)
     return vf_loss, vf_clipfrac
 

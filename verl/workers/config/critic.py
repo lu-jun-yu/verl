@@ -50,6 +50,7 @@ class CriticConfig(BaseConfig):
         shuffle (bool): Shuffle training data across PPO epochs.
         cliprange_value (float): PPO value function clipping range.
         loss_agg_mode (str): Loss aggregation mode.
+        value_loss_type (str): "auto" selects BCE for sigmoid heads and MSE otherwise.
         checkpoint (Dict[str, Any]): Checkpoint configuration.
         profiler (Dict[str, Any]): Profiler configuration.
         enable (Optional[bool]): Whether to enable the critic.
@@ -79,6 +80,7 @@ class CriticConfig(BaseConfig):
     cliprange_value: float = 0.5
     loss_agg_mode: str = "token-mean"
     value_head_activation: str = "none"
+    value_loss_type: str = "auto"
     ppo_micro_batch_size: Optional[int] = None
     engine: BaseConfig = field(default_factory=BaseConfig)
     optim: OptimizerConfig = field(default_factory=OptimizerConfig)

@@ -339,12 +339,12 @@ class AgentLoopWorkerBase:
             responses:     |<- LLM generation ->|<- tool_calls ->|<- LLM generation ->|<- padding ->|
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
-        # Continuation mode (OPTS tree search): generate from input_ids. Validation
-        # has no prefix / raw_prompt_len, so it always takes the normal path below.
-        if (
-            self.config.actor_rollout_ref.rollout.get("search", None) == "opts"
-            and not batch.meta_info.get("validate", False)
-        ):
+        # Continuation mode: OPTS sends both roots and branches through input_ids,
+        # while TreeRL only marks branch suffixes for continuation. Validation
+        # always follows the normal prompt path.
+        search_method = self.config.actor_rollout_ref.rollout.get("search", None)
+        treerl_continuation = search_method == "treerl" and "treerl_is_continuation" in batch.non_tensor_batch
+        if (search_method == "opts" or treerl_continuation) and not batch.meta_info.get("validate", False):
             return await self._generate_from_input_ids(batch)
 
         config = self.config.actor_rollout_ref.rollout
@@ -475,6 +475,17 @@ class AgentLoopWorkerBase:
             if "sampling_seed" in kwargs:
                 request_sampling_params = dict(sampling_params)
                 request_sampling_params["seed"] = int(kwargs["sampling_seed"])
+            if kwargs.get("treerl_is_continuation", False):
+                request_sampling_params = dict(request_sampling_params)
+                inherited_response_len = len(prompt_ids) - int(kwargs["raw_prompt_len"])
+                request_sampling_params["max_tokens"] = max(
+                    1,
+                    self.config.actor_rollout_ref.rollout.response_length - inherited_response_len,
+                )
+                if "treepo_segment_max_tokens" in kwargs:
+                    request_sampling_params["max_tokens"] = min(
+                        request_sampling_params["max_tokens"], int(kwargs["treepo_segment_max_tokens"])
+                    )
             output: AgentLoopOutput = await agent_loop.run_from_input_ids(
                 request_sampling_params, prompt_ids, **kwargs
             )
@@ -505,10 +516,16 @@ class AgentLoopWorkerBase:
         #   e.g., [0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,0,0,0,0]
 
         self.tokenizer.padding_side = "left"
+        prompt_padding_length = self.config.actor_rollout_ref.rollout.prompt_length
+        if kwargs.get("treerl_is_continuation", False):
+            # A branch prompt contains the raw prompt plus a generated-response
+            # prefix. It can be longer than the dataset prompt width even though
+            # the full root-to-leaf response still obeys response_length.
+            prompt_padding_length += self.config.actor_rollout_ref.rollout.response_length - 1
         prompt_output = self.tokenizer.pad(
             {"input_ids": output.prompt_ids},
             padding="max_length",
-            max_length=self.config.actor_rollout_ref.rollout.prompt_length,
+            max_length=prompt_padding_length,
             return_tensors="pt",
             return_attention_mask=True,
         )
@@ -606,7 +623,12 @@ class AgentLoopWorkerBase:
         enable_async_reward = (
             self.reward_router_address is not None and self.config.reward_model.enable_resource_pool
         ) or not self.config.reward_model.enable
-        if output.reward_score is None and enable_async_reward and self.use_reward_loop:
+        if (
+            output.reward_score is None
+            and enable_async_reward
+            and self.use_reward_loop
+            and not kwargs.get("treerl_defer_reward", False)
+        ):
             batch = TensorDict(
                 {
                     "prompts": prompt_output["input_ids"],  # [1, prompt_length]

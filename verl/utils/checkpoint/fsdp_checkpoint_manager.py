@@ -24,7 +24,8 @@ import torch.distributed
 from accelerate import init_empty_weights
 from omegaconf import DictConfig
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import ShardedOptimStateDictConfig, ShardedStateDictConfig, StateDictType
+from torch.distributed.fsdp import (FullOptimStateDictConfig, FullStateDictConfig,
+    ShardedOptimStateDictConfig, ShardedStateDictConfig, StateDictType)
 from transformers import GenerationConfig, PreTrainedTokenizer, ProcessorMixin
 from transformers.dynamic_module_utils import custom_object_save
 
@@ -51,6 +52,43 @@ class FSDPConfig:
 
     FSDP_version: int
     world_size: int
+
+
+def _single_rank_optimizer_to_named(model, optimizer, source):
+    """Unflatten a NO_SHARD optimizer using the unchanged FSDP parameter layout."""
+    names = {id(parameter): name for name, parameter in model.named_parameters()}
+    if len(source["param_groups"]) != len(optimizer.param_groups):
+        raise ValueError("Optimizer parameter groups changed across checkpoint resume")
+    result = {"state": {}, "param_groups": []}
+    for old_group, group in zip(source["param_groups"], optimizer.param_groups):
+        if len(old_group["params"]) != len(group["params"]):
+            raise ValueError("FSDP flat-parameter layout changed across checkpoint resume")
+        group_names = []
+        for old_id, parameter in zip(old_group["params"], group["params"]):
+            # Inter-parameter padding (use_orig_params=True) needs a different conversion.
+            if not hasattr(parameter, "_fqns") or any(getattr(parameter, "_is_padding_mask", ()) or ()):
+                raise ValueError("Single-rank resume requires unpadded FSDP flat parameters")
+            prefix = names[id(parameter)].rsplit(".", 1)[0]
+            prefix = ".".join(x for x in prefix.split(".") if x != "_fsdp_wrapped_module")
+            count = sum(parameter._numels)
+            states = source["state"].get(old_id, {})
+            for key, value in states.items():
+                if torch.is_tensor(value) and value.ndim > 0 and value.numel() != count:
+                    raise ValueError(f"Optimizer tensor {key} does not match FSDP flat size")
+            offset = 0
+            for name, shape, size in zip(parameter._fqns, parameter._shapes, parameter._numels):
+                fqn = f"{prefix}.{name}" if prefix else name
+                if fqn in result["state"]:
+                    raise ValueError(f"Duplicate optimizer parameter {fqn}")
+                result["state"][fqn] = {
+                    key: value.reshape(-1)[offset:offset + size].view(shape)
+                    if torch.is_tensor(value) and value.ndim > 0 else value
+                    for key, value in states.items()
+                }
+                group_names.append(fqn)
+                offset += size
+        result["param_groups"].append({**old_group, "params": group_names})
+    return result
 
 
 class FSDPCheckpointManager(BaseCheckpointManager):
@@ -119,6 +157,16 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 "optimizer must be provided when checkpoint_contents.load includes ['optimizer']"
             )
 
+        source_config_path = os.path.join(local_path, "fsdp_config.json")
+        if self.world_size > 1 and os.path.isfile(source_config_path):
+            with open(source_config_path) as handle:
+                source_config = json.load(handle)
+            if source_config.get("world_size") == 1:
+                if source_config.get("FSDP_version") != 1:
+                    raise ValueError("Single-rank migration currently supports FSDP1 source checkpoints")
+                self._load_single_rank_checkpoint(local_path)
+                return
+
         # every rank download its own checkpoint
         state_dict_cfg = (
             ShardedStateDictConfig(offload_to_cpu=True if is_cuda_available else False)
@@ -175,6 +223,38 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 )
 
         # wait for everyone to load checkpoints
+        torch.distributed.barrier()
+
+    def _load_single_rank_checkpoint(self, local_path):
+        """Reshard a single-rank FSDP1 checkpoint, retaining optimizer and extra state."""
+        if fsdp_version(self.model) != 1:
+            raise ValueError("Single-rank migration currently requires FSDP1")
+        with get_fsdp_state_ctx(self.model, StateDictType.FULL_STATE_DICT,
+                               FullStateDictConfig(offload_to_cpu=True, rank0_only=False),
+                               FullOptimStateDictConfig(offload_to_cpu=True, rank0_only=False)):
+            if self.should_load_model:
+                state = torch.load(os.path.join(local_path, "model_world_size_1_rank_0.pt"),
+                                   map_location="cpu", weights_only=False, mmap=True)
+                if any(not isinstance(value, torch.Tensor) or value.is_meta for value in state.values()):
+                    raise ValueError("Expected full tensors from single-rank NO_SHARD checkpoint")
+                self.model.load_state_dict(state)
+                del state
+            if self.should_load_optimizer:
+                raw = torch.load(os.path.join(local_path, "optim_world_size_1_rank_0.pt"),
+                                 map_location="cpu", weights_only=False, mmap=True)
+                named = _single_rank_optimizer_to_named(self.model, self.optimizer, raw)
+                shard = FSDP.optim_state_dict_to_load(self.model, self.optimizer, named)
+                self.optimizer.load_state_dict(shard)
+                del raw, named, shard
+        if self.should_load_extra:
+            state = torch.load(os.path.join(local_path, "extra_state_world_size_1_rank_0.pt"),
+                               map_location="cpu", weights_only=False)
+            if "rng" in state:
+                self.load_rng_state(state["rng"])
+            if self.lr_scheduler is not None and state.get("lr_scheduler") is not None:
+                self.lr_scheduler.load_state_dict(state["lr_scheduler"])
+        log_with_rank(f"Restored single-rank checkpoint with optimizer on {self.world_size} ranks: {local_path}",
+                      rank=self.rank, logger=logger)
         torch.distributed.barrier()
 
     def save_checkpoint(self, local_path: str, hdfs_path: str = None, global_step: int = 0, max_ckpt_to_keep=None):

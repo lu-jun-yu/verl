@@ -413,9 +413,10 @@ class DataParallelPPOActor(BasePPOActor):
             "input_ids",
             "attention_mask",
             "position_ids",
-            "old_log_probs",
             "advantages",
         ]
+        if "old_log_probs" in data.batch.keys():
+            select_keys.append("old_log_probs")
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
         # Include pre-computed IS weights if present in batch
@@ -439,6 +440,10 @@ class DataParallelPPOActor(BasePPOActor):
         mini_batches = data.split(self.config.ppo_mini_batch_size)
 
         on_policy = len(mini_batches) == 1 and self.config.ppo_epochs == 1
+        if "old_log_probs" not in data.batch.keys() and (
+            not on_policy or self.config.get("use_rollout_log_probs", False)
+        ):
+            raise ValueError("old_log_probs are required outside the single-update on-policy path")
 
         metrics = {}
         for _ in range(self.config.ppo_epochs):
@@ -459,7 +464,6 @@ class DataParallelPPOActor(BasePPOActor):
                     micro_batch_metrics = {}
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
                     response_mask = model_inputs["response_mask"]
-                    old_log_prob = model_inputs["old_log_probs"]
                     advantages = model_inputs["advantages"]
 
                     entropy_coeff = self.config.entropy_coeff

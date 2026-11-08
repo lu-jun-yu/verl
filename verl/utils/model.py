@@ -618,7 +618,7 @@ def patch_valuehead_model(model) -> None:
     model._no_split_modules = getattr(model.pretrained_model, "_no_split_modules", [])
 
 
-def initialize_value_head(model: nn.Module, std: float = 1e-3) -> None:
+def initialize_value_head(model: nn.Module, std: float = 1e-3, missing_keys=None) -> None:
     """Initialize the scalar value head near zero without a task-specific prior."""
     if hasattr(model, "v_head"):
         head = getattr(model.v_head, "summary", model.v_head)
@@ -636,8 +636,11 @@ def initialize_value_head(model: nn.Module, std: float = 1e-3) -> None:
     if not isinstance(head, nn.Linear):
         raise ValueError(f"Unsupported value head module type: {type(head)}")
 
-    nn.init.normal_(head.weight, mean=0.0, std=std)
-    if head.bias is not None:
+    # HF loading reports missing parameter names; preserve every loaded parameter.
+    names = {id(param): name for name, param in model.named_parameters()}
+    if missing_keys is None or names[id(head.weight)] in missing_keys:
+        nn.init.normal_(head.weight, mean=0.0, std=std)
+    if head.bias is not None and (missing_keys is None or names[id(head.bias)] in missing_keys):
         nn.init.zeros_(head.bias)
 
 
@@ -645,14 +648,15 @@ def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_cod
     from transformers import AutoModelForCausalLM, AutoModelForTokenClassification, AutoModelForVision2Seq
 
     try:
-        model = AutoModelForTokenClassification.from_pretrained(
+        model, loading_info = AutoModelForTokenClassification.from_pretrained(
             pretrained_model_name_or_path=local_path,
             torch_dtype=torch_dtype,
             config=model_config,
             attn_implementation="flash_attention_2",
             trust_remote_code=trust_remote_code,
+            output_loading_info=True,
         )
-        initialize_value_head(model)
+        initialize_value_head(model, missing_keys=set(loading_info["missing_keys"]))
         return model
     except BaseException as e:
         if not is_trl_available():
